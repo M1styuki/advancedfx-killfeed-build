@@ -219,7 +219,7 @@ bool g_SendAudioEmitterHooked = false;
 bool g_SendAudioParserHooked = false;
 bool g_RawAudioHooked = false;
 bool g_RawAudioFormatterHooked = false;
-volatile LONG g_RadioMode = 4;
+volatile LONG g_RadioMode = 2;
 // Normal demo playback has a reliable weapon_fire event for grenade throws.
 // Entity scanning is an emergency fallback only; keeping it off by default
 // prevents a persistent projectile entity from replaying the same notice.
@@ -1198,7 +1198,7 @@ bool IsProjectileRadioSlot(int slot)
     // "fire in the hole" voice token.  In mode4 these must come only from
     // weapon_fire/grenade_thrown.  SendAudio/RawAudio/sound-event are kept for
     // manual radio and bomb notices, but are deliberately not a second grenade
-    // source in the default mode.
+    // source in mode 4.
     return (101 <= slot && slot <= 106) || 117 == slot;
 }
 
@@ -3723,9 +3723,9 @@ CON_COMMAND(mirv_pov_radio_mode, "Select mirv_pov Radio implementation: 0..6.")
         "Usage: mirv_pov_radio_mode 0|1|2|3|4|5|6\n"
         "  0 - off: suppress native and event Radio\n"
         "  1 - native RadioText only (highest fidelity)\n"
-        "  2 - game-event synthetic, POV team only\n"
+        "  2 - game-event synthetic, POV team only (default)\n"
         "  3 - game-event synthetic, all T/CT players (may show enemy Radio)\n"
-        "  4 - auto: native RadioText, weapon_fire/grenade_thrown for projectiles, then other game-event/sound fallback (default)\n"
+        "  4 - auto: native RadioText, weapon_fire/grenade_thrown for projectiles, then other game-event/sound fallback\n"
         "  5 - SendAudio/RawAudio/sound-event plus game-event fallback, POV team only\n"
         "  6 - SendAudio/RawAudio/sound-event plus game-event fallback, all T/CT players (may show enemy Radio)\n"
         "Current: %d (%s)\n",
