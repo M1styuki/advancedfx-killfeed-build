@@ -143,6 +143,52 @@ static bool MirvPovHud_PanelContainsId(unsigned char* parentPanel, const char* p
     return nullptr != MirvPovHud_FindPanelById(parentPanel, panelId);
 }
 
+static void MirvPovHud_SetPanelsWithClassVisible(
+    unsigned char* panel,
+    short classSymbol,
+    bool visible) {
+    if(!panel) return;
+
+    auto vtable = *(void***)panel;
+    if(vtable) {
+        using HasPanelClass_t = bool (__fastcall *)(void*, short);
+        auto hasPanelClass = reinterpret_cast<HasPanelClass_t>(vtable[157]);
+        if(hasPanelClass && hasPanelClass(panel, classSymbol)) {
+            MirvPovHud_SetPanelVisible(panel, visible);
+        }
+    }
+
+    const auto children = panel + CS2::PanoramaUIPanel::children;
+    const auto childCount = *(int*)children;
+    for(int i = 0; i < childCount; ++i) {
+        MirvPovHud_SetPanelsWithClassVisible(
+            ((unsigned char***)children)[1][i],
+            classSymbol,
+            visible);
+    }
+}
+
+static void MirvPovHud_SetTeamCounterPlayerNamesVisible(bool visible) {
+    __try {
+        auto hudPanel = MirvPovHud_GetHudPanel();
+        if(!hudPanel) return;
+
+        short nameClass = -1;
+        if(!MirvPovHud_MakeSymbol("AvatarL__name", nameClass)) return;
+        MirvPovHud_SetPanelsWithClassVisible(hudPanel, nameClass, visible);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+}
+
+static void MirvPovHud_RefreshTeamCounterPlayerNames() {
+    auto hudPanel = MirvPovHud_GetHudPanel();
+    if(!hudPanel) return;
+
+    // Native alive POV CSS shows names only while ROUNDDOWNTIME is set. The
+    // real spectator root otherwise keeps them visible throughout the round.
+    MirvPovHud_SetTeamCounterPlayerNamesVisible(
+        Panorama_HasPanelClass(hudPanel, "ROUNDDOWNTIME"));
+}
+
 static bool MirvPovHud_SetStrokeSiblingVisibleForAnchor(unsigned char* parentPanel, const char* anchorId) {
     if(!parentPanel) return false;
 
@@ -390,6 +436,7 @@ void MirvPovHud_ReapplyPanelState() {
         // observer updates.
         MirvPovHud_HideSpecPlayerPanel();
         MirvPovHud_SetSpectatorHotKeyLabelsVisible(false);
+        MirvPovHud_RefreshTeamCounterPlayerNames();
         MirvPovHud_RefreshBuyZoneIcon();
     }
 }
@@ -518,6 +565,7 @@ void MirvPovHud_RemovePatches() {
     g_FlashViewPredicateReturnAddresses[0] = nullptr;
     g_FlashViewPredicateReturnAddresses[1] = nullptr;
     MirvPovHud_SetSpectatorHotKeyLabelsVisible(true);
+    MirvPovHud_SetTeamCounterPlayerNamesVisible(true);
     MirvPovHud_ResetPanelState();
     g_ScoreboardSeekSuppressFrames = 0;
     g_LastDemoTick = -1;

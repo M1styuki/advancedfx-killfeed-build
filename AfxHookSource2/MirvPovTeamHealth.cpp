@@ -43,6 +43,11 @@ void * g_ObserverGateReturnAddresses[3] = {};
 bool g_Hooked = false;
 thread_local TargetRelation g_TargetRelation = TargetRelation::Unknown;
 
+constexpr size_t kPlayerStateSize = 0x38;
+constexpr size_t kPlayerStateSpectateTargetOffset = 0x17;
+constexpr size_t kPlayerDataFlagsOffset = 0x08;
+constexpr uint8_t kPlayerDataSpectateTargetMask = 0x80;
+
 TargetRelation ClassifyPlayerState(const void * playerState)
 {
     if(!MIRV_POV_FEATURE_ACTIVE("teamhealth") || nullptr == playerState
@@ -73,7 +78,18 @@ void __fastcall New_BuildPlayerData(void * teamCounter, void * output, const voi
 {
     TargetRelation previous = g_TargetRelation;
     g_TargetRelation = ClassifyPlayerState(playerState);
-    g_OrgBuildPlayerData(teamCounter, output, playerState, row);
+
+    // A live player POV never has an observer target. Build from a copy so the
+    // TeamCounter cannot propagate its observer-only target byte into bit 7 of
+    // the cached player-data flags (Avatar__SpectateTarget in Panorama).
+    if(MIRV_POV_FEATURE_ACTIVE("teamhealth") && nullptr != playerState) {
+        alignas(uint64_t) uint8_t playerStateCopy[kPlayerStateSize];
+        memcpy(playerStateCopy, playerState, sizeof(playerStateCopy));
+        playerStateCopy[kPlayerStateSpectateTargetOffset] = 0;
+        g_OrgBuildPlayerData(teamCounter, output, playerStateCopy, row);
+    } else {
+        g_OrgBuildPlayerData(teamCounter, output, playerState, row);
+    }
     g_TargetRelation = previous;
 }
 
@@ -81,6 +97,15 @@ void __fastcall New_PresentPlayerData(void * teamCounter, const void * playerSta
 {
     TargetRelation previous = g_TargetRelation;
     g_TargetRelation = ClassifyPlayerState(playerState);
+
+    // Clear cached rows immediately as well, including rows built before
+    // mirv_pov was enabled or retained across a demo seek.
+    if(MIRV_POV_FEATURE_ACTIVE("teamhealth") && nullptr != output) {
+        __try {
+            reinterpret_cast<uint8_t *>(output)[kPlayerDataFlagsOffset]
+                &= ~kPlayerDataSpectateTargetMask;
+        } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    }
     g_OrgPresentPlayerData(teamCounter, playerState, output);
     g_TargetRelation = previous;
 }
