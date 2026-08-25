@@ -153,7 +153,7 @@ __int64 __fastcall New_NativeDeathCam(void * This)
     if(nullptr == original) return 0;
 
     if(g_InNativeDeathCam
-        || !MirvPov_IsEnabled()
+        || !MIRV_POV_FEATURE_ACTIVE("deathcam")
         || !g_DeathActive.load(std::memory_order_acquire)) {
         return original(This);
     }
@@ -282,7 +282,7 @@ void MirvPovDeathCam_Initialize(HMODULE clientDll)
 
 void MirvPovDeathCam_HandleGameEvent(SOURCESDK::CS2::IGameEvent * event)
 {
-    if(nullptr == event || !MirvPov_IsEnabled()) return;
+    if(nullptr == event || !MIRV_POV_FEATURE_ACTIVE("deathcam")) return;
 
     const char * name = nullptr;
     __try {
@@ -319,7 +319,7 @@ void MirvPovDeathCam_HandleGameEvent(SOURCESDK::CS2::IGameEvent * event)
 
 void MirvPovDeathCam_UpdateDemoTick(int demoTick)
 {
-    if(!MirvPov_IsEnabled()) {
+    if(!MIRV_POV_FEATURE_ACTIVE("deathcam")) {
         g_LastDemoTick.store(-1, std::memory_order_release);
         return;
     }

@@ -26,6 +26,12 @@
 
 extern SOURCESDK::CS2::ISource2EngineToClient * g_pEngineToClient;
 
+#if AFX_MIRV_POV_DIAGNOSTICS
+#define MIRV_POV_FEATURE_ENABLED(name) MirvPovDebug_IsFeatureEnabled(name)
+#else
+#define MIRV_POV_FEATURE_ENABLED(name) true
+#endif
+
 namespace {
 
 int g_FakePovRadarControllerIndex = 0;
@@ -34,6 +40,49 @@ bool g_MirvPovEnabled = false;
 bool g_MirvPovDeathFeedbackEnabled = true;
 bool g_MirvPovHadDemoFile = false;
 thread_local void * g_MirvPovHookReturnAddress = nullptr;
+
+#if AFX_MIRV_POV_DIAGNOSTICS
+struct MirvPovDebugFeatureState {
+    const char * name;
+    bool configured;
+    bool active;
+};
+
+MirvPovDebugFeatureState g_MirvPovDebugFeatures[] = {
+    {"voice_script", true, true},
+    {"cvars", true, true},
+    {"teamid", true, true},
+    {"soundcircle", true, true},
+    {"hud", true, true},
+    {"teamhealth", true, true},
+    {"radar", true, true},
+    {"voice", true, true},
+    {"scoreboard", true, true},
+    {"feedback", true, true},
+    {"deathcam", true, true},
+    {"pickupprompt", true, true},
+    {"killreward", true, true},
+    {"radio", true, true},
+    {"radio_text_dispatch", true, true},
+    {"radio_text_handler", true, true},
+    {"radio_sendaudio_dispatch", true, true},
+    {"radio_sendaudio_emitter", true, true},
+    {"radio_sendaudio_parser", true, true},
+    {"radio_rawaudio_dispatch", true, true},
+    {"radio_rawaudio_formatter", true, true},
+    {"framestage", true, true},
+    {"voiceban", true, true}
+};
+
+MirvPovDebugFeatureState * FindMirvPovDebugFeature(const char * name)
+{
+    if(nullptr == name) return nullptr;
+    for(auto & feature : g_MirvPovDebugFeatures) {
+        if(0 == _stricmp(feature.name, name)) return &feature;
+    }
+    return nullptr;
+}
+#endif
 
 CEntityInstance * GetPawnFromController(CEntityInstance * controller)
 {
@@ -78,6 +127,56 @@ CEntityInstance * ResolveConfiguredPovPlayerController()
 }
 
 } // namespace
+
+#if AFX_MIRV_POV_DIAGNOSTICS
+bool MirvPovDebug_CanConfigure()
+{
+    return true;
+}
+
+bool MirvPovDebug_HasFeature(const char * name)
+{
+    return nullptr != FindMirvPovDebugFeature(name);
+}
+
+bool MirvPovDebug_IsFeatureEnabled(const char * name)
+{
+    MirvPovDebugFeatureState * feature = FindMirvPovDebugFeature(name);
+    return nullptr != feature && feature->active;
+}
+
+bool MirvPovDebug_SetFeatureEnabled(const char * name, bool enabled)
+{
+    if(nullptr != name && 0 == _stricmp(name, "all")) {
+        for(auto & feature : g_MirvPovDebugFeatures) feature.configured = enabled;
+        return true;
+    }
+    MirvPovDebugFeatureState * feature = FindMirvPovDebugFeature(name);
+    if(nullptr == feature) return false;
+    feature->configured = enabled;
+    return true;
+}
+
+void MirvPovDebug_ApplyFeatureConfiguration()
+{
+    for(auto & feature : g_MirvPovDebugFeatures) feature.active = feature.configured;
+}
+
+void MirvPovDebug_PrintFeatureStates()
+{
+    MIRV_POV_DIAGNOSTIC_MESSAGE(
+        "mirv_pov debug features (%s):\n",
+        MirvPov_IsEnabled() ? "active / configured for next enable" : "inactive / configured");
+    for(const auto & feature : g_MirvPovDebugFeatures) {
+        MIRV_POV_DIAGNOSTIC_MESSAGE(
+            "  %-14s active=%d configured=%d%s\n",
+            feature.name,
+            feature.active ? 1 : 0,
+            feature.configured ? 1 : 0,
+            feature.active != feature.configured ? " (pending)" : "");
+    }
+}
+#endif
 
 bool MirvPov_IsEnabled()
 {
@@ -225,80 +324,91 @@ void MirvPov_UpdateSeekDetection()
         return;
     }
     g_MirvPovHadDemoFile = true;
-    MirvPovHud_ReapplyPanelState();
+    if(MIRV_POV_FEATURE_ENABLED("hud")) MirvPovHud_ReapplyPanelState();
     const int demoTick = demoFile->GetDemoTick();
-    MirvPovDeathCam_UpdateDemoTick(demoTick);
-    MirvPovHud_UpdateSeekDetection(demoTick);
-    MirvPovKillReward_OnDemoTick(demoTick);
-    MirvPovRadio_OnDemoTick(demoTick);
+    if(MIRV_POV_FEATURE_ENABLED("deathcam")) MirvPovDeathCam_UpdateDemoTick(demoTick);
+    if(MIRV_POV_FEATURE_ENABLED("hud")) MirvPovHud_UpdateSeekDetection(demoTick);
+    if(MIRV_POV_FEATURE_ENABLED("killreward")) MirvPovKillReward_OnDemoTick(demoTick);
+    if(MIRV_POV_FEATURE_ENABLED("radio")) MirvPovRadio_OnDemoTick(demoTick);
 }
 
 void MirvPov_OnFrameStageBefore(int frameStage)
 {
     if(SOURCESDK::CS2::FRAME_RENDER_PASS != frameStage) return;
+#if AFX_MIRV_POV_DIAGNOSTICS
+    if(!MIRV_POV_FEATURE_ENABLED("framestage")) return;
+#endif
 
-    MirvPovVoice_OnRenderPass();
-    MirvPovVoiceBan_OnRenderPass();
-    MirvPovScoreboard_Update();
+    if(MIRV_POV_FEATURE_ENABLED("voice")) MirvPovVoice_OnRenderPass();
+    if(MIRV_POV_FEATURE_ENABLED("voiceban")) MirvPovVoiceBan_OnRenderPass();
+    if(MIRV_POV_FEATURE_ENABLED("scoreboard")) MirvPovScoreboard_Update();
 }
 
 void MirvPov_OnFrameStageAfter(int frameStage)
 {
     if(SOURCESDK::CS2::FRAME_RENDER_PASS == frameStage) {
+#if AFX_MIRV_POV_DIAGNOSTICS
+        if(!MIRV_POV_FEATURE_ENABLED("framestage")) return;
+#endif
         // Run after the game's native FrameStageNotify. Observer target and
         // Pawn state are committed there; sampling them before the original
         // call shifts fade cleanup and replay timing by one frame.
-        MirvPovFeedback_UpdatePovSelection();
-        MirvPovDeathPanel_Update();
-        RenderSystemDX11_DeathFade_UpdateObserverState();
+        if(MIRV_POV_FEATURE_ENABLED("feedback")) {
+            MirvPovFeedback_UpdatePovSelection();
+            MirvPovDeathPanel_Update();
+            RenderSystemDX11_DeathFade_UpdateObserverState();
+        }
         MirvPov_UpdateSeekDetection();
-        MirvPovVoice_AfterRenderPass();
+        if(MIRV_POV_FEATURE_ENABLED("voice")) MirvPovVoice_AfterRenderPass();
     }
 }
 
 void MirvPov_OnGameEvent(SOURCESDK::CS2::IGameEvent * event)
 {
-    MirvPovDeathCam_HandleGameEvent(event);
-    MirvPovFeedback_HandleGameEvent(event);
+    if(MIRV_POV_FEATURE_ENABLED("deathcam")) MirvPovDeathCam_HandleGameEvent(event);
+    if(MIRV_POV_FEATURE_ENABLED("feedback")) MirvPovFeedback_HandleGameEvent(event);
 }
 
 void MirvPov_OnPanoramaDllLoaded(HMODULE panoramaDll)
 {
-    MirvPovHud_OnPanoramaDllLoaded(panoramaDll);
+    if(MIRV_POV_FEATURE_ENABLED("hud")) MirvPovHud_OnPanoramaDllLoaded(panoramaDll);
 }
 
 void MirvPov_OnPanoramaLayoutFileLoaded(const char * filePath)
 {
-    MirvPovHud_OnPanoramaLayoutFileLoaded(filePath);
+    if(MIRV_POV_FEATURE_ENABLED("hud")) MirvPovHud_OnPanoramaLayoutFileLoaded(filePath);
 }
 
 void MirvPov_OnLevelInitPreEntity()
 {
     g_MirvPovHadDemoFile = false;
-    MirvPovHud_OnLevelInitPreEntity();
+    if(MIRV_POV_FEATURE_ENABLED("hud")) MirvPovHud_OnLevelInitPreEntity();
 }
 
 void MirvPov_Enable(HMODULE clientDll)
 {
     if(g_MirvPovEnabled) return;
 
+#if AFX_MIRV_POV_DIAGNOSTICS
+    MirvPovDebug_ApplyFeatureConfiguration();
+#endif
     g_MirvPovAutoSync = true;
     MirvPovScoreboard_Reset();
-    MirvPovSoundCircle_Initialize(clientDll);
-    MirvPovHud_ApplyPatches(clientDll);
-    MirvPovTeamHealth_Initialize(clientDll);
-    MirvPov_ApplyRadarPatches(clientDll);
-    if(MirvPovVoice_IsEnabled()) MirvPov_HookVoiceHud(clientDll);
-    MirvPovScoreboard_Initialize(clientDll);
+    if(MIRV_POV_FEATURE_ENABLED("soundcircle")) MirvPovSoundCircle_Initialize(clientDll);
+    if(MIRV_POV_FEATURE_ENABLED("hud")) MirvPovHud_ApplyPatches(clientDll);
+    if(MIRV_POV_FEATURE_ENABLED("teamhealth")) MirvPovTeamHealth_Initialize(clientDll);
+    if(MIRV_POV_FEATURE_ENABLED("radar")) MirvPov_ApplyRadarPatches(clientDll);
+    if(MIRV_POV_FEATURE_ENABLED("voice") && MirvPovVoice_IsEnabled()) MirvPov_HookVoiceHud(clientDll);
+    if(MIRV_POV_FEATURE_ENABLED("scoreboard")) MirvPovScoreboard_Initialize(clientDll);
     MirvPov_ResetVoiceHud();
 
     g_MirvPovEnabled = true;
-    MirvPovFeedback_Initialize(clientDll);
-    MirvPovDeathCam_Initialize(clientDll);
-    MirvPovPickupPrompt_Initialize(clientDll);
-    MirvPovKillReward_Initialize(clientDll);
-    MirvPovRadio_Initialize(clientDll);
-    if(MirvPovVoice_IsEnabled()) MirvPov_UpdateVoiceTeam();
+    if(MIRV_POV_FEATURE_ENABLED("feedback")) MirvPovFeedback_Initialize(clientDll);
+    if(MIRV_POV_FEATURE_ENABLED("deathcam")) MirvPovDeathCam_Initialize(clientDll);
+    if(MIRV_POV_FEATURE_ENABLED("pickupprompt")) MirvPovPickupPrompt_Initialize(clientDll);
+    if(MIRV_POV_FEATURE_ENABLED("killreward")) MirvPovKillReward_Initialize(clientDll);
+    if(MIRV_POV_FEATURE_ENABLED("radio")) MirvPovRadio_Initialize(clientDll);
+    if(MIRV_POV_FEATURE_ENABLED("voice") && MirvPovVoice_IsEnabled()) MirvPov_UpdateVoiceTeam();
 }
 
 void MirvPov_Disable()

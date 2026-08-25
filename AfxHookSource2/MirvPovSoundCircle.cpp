@@ -225,7 +225,7 @@ CEntityInstance * __fastcall New_GetLocalPawn()
     void * returnAddress = MirvPov_GetHookReturnAddress();
     CEntityInstance * nativePawn = g_OrgGetLocalPawn();
     MirvPov_PopHookReturnAddress(previousReturnAddress);
-    if(!MirvPov_IsEnabled()) return nativePawn;
+    if(!MIRV_POV_FEATURE_ACTIVE("soundcircle")) return nativePawn;
 
     int gate = returnAddress == g_SoundGateReturnAddresses[0]
         ? 0
@@ -273,7 +273,7 @@ void __fastcall New_DoStartSoundEvent(void * soundOpGameSystem, void * netMessag
 
     g_OrgDoStartSoundEvent(soundOpGameSystem, netMessage);
 
-    if(!MirvPov_IsEnabled() || 0 == eventHash) return;
+    if(!MIRV_POV_FEATURE_ACTIVE("soundcircle") || 0 == eventHash) return;
 
     __try {
         void * soundEventInterface = GetSoundEventInterface();

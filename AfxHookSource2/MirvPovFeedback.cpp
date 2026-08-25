@@ -142,7 +142,7 @@ __int64 __fastcall New_DamageMessage(void * hudDamageIndicator, void * damageMes
     __int64 result = nullptr != g_OriginalDamageMessage
         ? g_OriginalDamageMessage(hudDamageIndicator, damageMessage)
         : 0;
-    if(!MirvPov_IsEnabled()
+    if(!MIRV_POV_FEATURE_ACTIVE("feedback")
         || nullptr == hudDamageIndicator
         || nullptr == damageMessage
         || nullptr == g_AddDamageDirection) return result;
@@ -347,7 +347,7 @@ void MirvPovFeedback_Initialize(HMODULE clientDll)
 
 void MirvPovFeedback_UpdatePovSelection()
 {
-    if(!MirvPov_IsEnabled()) return;
+    if(!MIRV_POV_FEATURE_ACTIVE("feedback")) return;
 
     CEntityInstance * controller = GetCurrentPovPlayerController();
     if(nullptr == controller) controller = GetObservedPlayerController();
@@ -396,7 +396,7 @@ bool MirvPovFeedback_IsCurrentPovVictim(
 
 void MirvPovFeedback_HandleGameEvent(SOURCESDK::CS2::IGameEvent * event)
 {
-    if(nullptr == event || !MirvPov_IsEnabled() || nullptr == g_HashString) return;
+    if(nullptr == event || !MIRV_POV_FEATURE_ACTIVE("feedback") || nullptr == g_HashString) return;
     const char * name = event->GetName();
     if(nullptr == name) return;
 
@@ -413,7 +413,7 @@ void MirvPovFeedback_HandleGameEvent(SOURCESDK::CS2::IGameEvent * event)
 
 bool MirvPovFeedback_IsLocalPlayerVictim(SOURCESDK::CS2::IGameEvent * event)
 {
-    if(nullptr == event || !MirvPov_IsEnabled() || nullptr == g_HashString) {
+    if(nullptr == event || !MIRV_POV_FEATURE_ACTIVE("feedback") || nullptr == g_HashString) {
         return false;
     }
 

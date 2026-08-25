@@ -122,7 +122,7 @@ static constexpr int kPovDeathPanelReapplyFrameWindow = 1024;
 // the observer target changes and the normal cleanup path disarms the state.
 __int64 __fastcall MirvPovDeathPanel_HideWhileAlive(u_char * deathPanel)
 {
-	const bool suppress = MirvPov_IsEnabled()
+	const bool suppress = MIRV_POV_FEATURE_ACTIVE("deathcam")
 		&& MirvPov_IsDeathFeedbackEnabled()
 		&& g_MirvPovDeathPanelState.reapplyArmed
 		&& nullptr != deathPanel
@@ -256,7 +256,7 @@ static bool DeathPanel_TryGetObserverTarget(uint32_t & targetHandle)
 bool MirvPovDeathPanel_Reapply(const char * source)
 {
 	if(!g_MirvPovDeathPanelState.reapplyArmed
-		|| !MirvPov_IsEnabled()
+		|| !MIRV_POV_FEATURE_ACTIVE("deathcam")
 		|| !MirvPov_IsDeathFeedbackEnabled()
 		|| nullptr == g_MirvPovDeathPanelState.reapplyPanel
 		|| nullptr == g_MirvPovDeathPanelState.show) {
@@ -266,7 +266,7 @@ bool MirvPovDeathPanel_Reapply(const char * source)
 				"armed=%d enabled=%d panel=%p show=%p\n",
 				source ? source : "[unknown]",
 				g_MirvPovDeathPanelState.reapplyArmed ? 1 : 0,
-				MirvPov_IsEnabled() ? 1 : 0,
+				MIRV_POV_FEATURE_ACTIVE("deathcam") ? 1 : 0,
 				g_MirvPovDeathPanelState.reapplyPanel,
 				reinterpret_cast<void *>(reinterpret_cast<uintptr_t>(g_MirvPovDeathPanelState.show)));
 		}
@@ -332,7 +332,7 @@ bool MirvPovDeathPanel_Reapply(const char * source)
 
 void MirvPovDeathPanel_Update()
 	{
-		if(!g_MirvPovDeathPanelState.reapplyArmed || !MirvPov_IsEnabled()
+		if(!g_MirvPovDeathPanelState.reapplyArmed || !MIRV_POV_FEATURE_ACTIVE("deathcam")
 			|| !MirvPov_IsDeathFeedbackEnabled()
 			|| nullptr == g_MirvPovDeathPanelState.reapplyPanel) return;
 

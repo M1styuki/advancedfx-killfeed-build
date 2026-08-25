@@ -185,20 +185,6 @@ constexpr uintptr_t kSendAudioVtableRva = 0x1B756E8;
 constexpr uintptr_t kSendAudioVtableLegacyRva = 0x1AB9220;
 constexpr uintptr_t kRawAudioVtableRva = 0x1B75640;
 constexpr uintptr_t kRawAudioVtableLegacyRva = 0x1BB7FB0;
-// Direct formatter RVAs confirmed in IDA for the exact client.dll build used
-// by this worktree.  The generic delegate tables above are still hooked for
-// compatibility, but the formatter hooks are the authoritative typed-message
-// path during demo playback.
-constexpr uintptr_t kRadioTextFormatterRva = 0x10D6240;
-// The shared HudChat formatter gate calls sub_180C92590() and tests byte
-// +0x72 while a demo is playing. IDA confirms this getter is a tiny
-// `lea rax, off_18207CC60; ret` at image+0xC92590; the older signature below
-// expected padding bytes that are not present in the current client.dll and
-// consequently left g_GetDemoController null.
-constexpr uintptr_t kDemoControllerRva = 0xC92590;
-constexpr uintptr_t kSendAudioParserRva = 0xB04D30;
-constexpr uintptr_t kRawAudioFormatterRva = 0x10D6A50;
-
 RadioTextHandler_t g_OrgRadioTextHandler = nullptr;
 RadioTextDispatch_t g_OrgRadioTextDispatch = nullptr;
 SendAudioDispatch_t g_OrgSendAudioDispatch = nullptr;
@@ -2364,7 +2350,7 @@ bool DispatchGrenadeRadioNotice(
 
 void ProcessProjectileEntity(CEntityInstance * entity, int suppliedHandle, const char * source, bool allowEmit)
 {
-    if(!MirvPov_IsEnabled() || nullptr == entity) return;
+    if(!MIRV_POV_FEATURE_ACTIVE("radio") || nullptr == entity) return;
     int mode = GetRadioMode();
     if(mode < 2 || 6 < mode) return;
 
@@ -2441,7 +2427,7 @@ void ProcessProjectileEntity(CEntityInstance * entity, int suppliedHandle, const
 
 void ScanProjectileEntities(bool primeOnly)
 {
-    if(!MirvPov_IsEnabled() || nullptr == g_pEntityList || nullptr == *g_pEntityList
+    if(!MIRV_POV_FEATURE_ACTIVE("radio") || nullptr == g_pEntityList || nullptr == *g_pEntityList
         || nullptr == g_GetEntityFromIndex || nullptr == g_GetHighestEntityIndex) return;
     if(!primeOnly && !IsProjectileScanFallbackEnabled()) return;
     int mode = GetRadioMode();
@@ -2785,6 +2771,9 @@ void HandleSendAudioToken(const char * token)
 
 __int64 __fastcall New_SendAudioEmitter(void * message)
 {
+    if(!MIRV_POV_FEATURE_ACTIVE("radio_sendaudio_emitter")) {
+        return nullptr != g_OrgSendAudioEmitter ? g_OrgSendAudioEmitter(message) : 0;
+    }
     char token[sizeof(g_LastSendAudioToken)] = {};
     bool decoded = false;
     __try {
@@ -2811,6 +2800,9 @@ __int64 __fastcall New_SendAudioEmitter(void * message)
 
 __int64 __fastcall New_SendAudioParser(void * message)
 {
+    if(!MIRV_POV_FEATURE_ACTIVE("radio_sendaudio_parser")) {
+        return nullptr != g_OrgSendAudioParser ? g_OrgSendAudioParser(message) : 0;
+    }
     char token[sizeof(g_LastSendAudioToken)] = {};
     bool decoded = false;
     bool suppressOriginal = false;
@@ -2941,9 +2933,15 @@ void HandleRawAudioMessage(void * message)
 
 __int64 __fastcall New_SendAudioDispatch(void * owner, void * message)
 {
-    // CS2 clones CGameMessageDelegateHook for several user-message
-    // registrations. Decode the payload first so cloned owners do not hide
-    // valid radio messages.
+    if(!MIRV_POV_FEATURE_ACTIVE("radio_sendaudio_dispatch")) {
+        return nullptr != g_OrgSendAudioDispatch ? g_OrgSendAudioDispatch(owner, message) : 0;
+    }
+    // This Dispatch implementation is shared by several user-message vtables.
+    // Decoding every cloned owner makes unrelated high-frequency messages hit
+    // the guarded SendAudio offset probes during accelerated demo playback.
+    if(!IsExpectedDelegateOwner(owner, g_SendAudioVtable)) {
+        return nullptr != g_OrgSendAudioDispatch ? g_OrgSendAudioDispatch(owner, message) : 0;
+    }
     char token[sizeof(g_LastSendAudioToken)];
     bool decoded = DecodeSendAudioToken(message, token, sizeof(token));
     bool suppressOriginal = false;
@@ -2965,6 +2963,9 @@ __int64 __fastcall New_SendAudioDispatch(void * owner, void * message)
 
 __int64 __fastcall New_RawAudioHandler(void * owner, void * message)
 {
+    if(!MIRV_POV_FEATURE_ACTIVE("radio_rawaudio_dispatch")) {
+        return nullptr != g_OrgRawAudioHandler ? g_OrgRawAudioHandler(owner, message) : 0;
+    }
     if(!IsExpectedDelegateOwner(owner, g_RawAudioVtable) && nullptr == message) return 0;
     const bool suppressOriginal = IsSuppressedRawAudioMessage(message);
     HandleRawAudioMessage(message);
@@ -2983,6 +2984,9 @@ __int64 __fastcall New_RawAudioHandler(void * owner, void * message)
 // dispatch hook only as a compatibility/deduplication source.
 __int64 __fastcall New_RawAudioFormatter(void * owner, void * message)
 {
+    if(!MIRV_POV_FEATURE_ACTIVE("radio_rawaudio_formatter")) {
+        return nullptr != g_OrgRawAudioFormatter ? g_OrgRawAudioFormatter(owner, message) : 0;
+    }
     const bool suppressOriginal = IsSuppressedRawAudioMessage(message);
     HandleRawAudioMessage(message);
     if(suppressOriginal) {
@@ -2995,6 +2999,9 @@ __int64 __fastcall New_RawAudioFormatter(void * owner, void * message)
 
 __int64 __fastcall New_RadioTextDispatch(void * owner, void * message)
 {
+    if(!MIRV_POV_FEATURE_ACTIVE("radio_text_dispatch")) {
+        return nullptr != g_OrgRadioTextDispatch ? g_OrgRadioTextDispatch(owner, message) : 0;
+    }
     // The current RadioText table is the one at image+0x1B75608.  The
     // dispatcher is shared by several user-message registrations in some
     // builds, so do not reject cloned owners here; the typed formatter remains
@@ -3003,7 +3010,7 @@ __int64 __fastcall New_RadioTextDispatch(void * owner, void * message)
     unsigned char * demoController = nullptr;
     unsigned char previousSuppress = 0;
     bool restoreSuppress = false;
-    const bool povEnabled = MirvPov_IsEnabled();
+    const bool povEnabled = MIRV_POV_FEATURE_ACTIVE("radio_text_dispatch");
     // The kill-reward patch and RadioText use related demo guards, but they
     // are not the same formatter on all client builds.  Always manage the
     // RadioText guard here; otherwise a kill-reward initialization can make
@@ -3053,6 +3060,10 @@ __int64 __fastcall New_RadioTextDispatch(void * owner, void * message)
 void __fastcall New_RadioTextHandler(void * owner, void * message)
 {
     if(nullptr == g_OrgRadioTextHandler) return;
+    if(!MIRV_POV_FEATURE_ACTIVE("radio_text_handler")) {
+        g_OrgRadioTextHandler(owner, message);
+        return;
+    }
 
     int clientIndex = -1;
     __try {
@@ -3066,7 +3077,7 @@ void __fastcall New_RadioTextHandler(void * owner, void * message)
     CEntityInstance * nativeController = GetControllerFromClientSlot(clientIndex);
     int nativeEntityIndex = GetEntityIndex(nativeController);
 
-    bool povEnabled = MirvPov_IsEnabled();
+    bool povEnabled = MIRV_POV_FEATURE_ACTIVE("radio_text_handler");
     int mode = GetRadioMode();
     bool callOriginal = !povEnabled || 1 == mode || 4 == mode;
     bool nativeVisible = !povEnabled || (1 != mode && 4 != mode)
@@ -3214,18 +3225,6 @@ void MirvPovRadio_Initialize(HMODULE clientDll)
         getDemoControllerPattern,
         getDemoControllerAddress);
 
-    // The current client.dll's formatter RVA is known from the IDA database.
-    // Use it when a compiler update changes the prologue enough for the byte
-    // signature above to stop matching; the range check keeps this fallback
-    // restricted to an executable address in the loaded module.
-    if(!radioTextPatternFound) {
-        const size_t knownAddress = clientBase + kRadioTextFormatterRva;
-        if(textRange.Start <= knownAddress && knownAddress < textRange.End) {
-            radioTextHandlerAddress = knownAddress;
-            radioTextPatternFound = true;
-        }
-    }
-
     if(radioTextPatternFound) {
         g_OrgRadioTextHandler = reinterpret_cast<RadioTextHandler_t>(radioTextHandlerAddress);
         DetourTransactionBegin();
@@ -3240,17 +3239,9 @@ void MirvPovRadio_Initialize(HMODULE clientDll)
     } else {
         MIRV_POV_DIAGNOSTIC_WARNING("[mirv_pov_radio] RadioText handler pattern was not found uniquely.\n");
     }
-    // Prefer the IDA-confirmed RVA. The current getter is only seven bytes
-    // (`48 8D 05 ?? ?? ?? ?? C3`) and therefore does not match the legacy
-    // padded signature above. Keeping the pattern as a fallback preserves
-    // compatibility with older client builds.
-    const size_t knownDemoControllerAddress = clientBase + kDemoControllerRva;
-    if(textRange.Start <= knownDemoControllerAddress
-        && knownDemoControllerAddress < textRange.End) {
-        g_GetDemoController = reinterpret_cast<GetDemoController_t>(knownDemoControllerAddress);
-        getDemoControllerAddress = knownDemoControllerAddress;
-        demoControllerPatternFound = true;
-    } else if(demoControllerPatternFound) {
+    // Never fall back to an RVA here. The 2026-08-25 update placed executable
+    // code at the previous getter RVA; calling it crashed at client+0xC925A8.
+    if(demoControllerPatternFound) {
         g_GetDemoController = reinterpret_cast<GetDemoController_t>(getDemoControllerAddress);
     } else {
         MIRV_POV_DIAGNOSTIC_WARNING("[mirv_pov_radio] Demo controller getter was not resolved.\n");
@@ -3326,7 +3317,7 @@ void MirvPovRadio_Initialize(HMODULE clientDll)
         MIRV_POV_DIAGNOSTIC_WARNING("[mirv_pov_radio] SendAudio emitter pattern was not found uniquely.\n");
     }
 
-    // IDA Pro (client.dll 2026-08-11): this is the concrete SendAudio
+    // IDA Pro (client.dll 2026-08-25): this is the concrete SendAudio
     // protobuf parser at image+0xB04D30. Unlike the generic delegate wrapper,
     // it receives the typed message directly and reads radio_sound from
     // message+0x48. Hook it as the primary semantic path so demo playback
@@ -3342,13 +3333,6 @@ void MirvPovRadio_Initialize(HMODULE clientDll)
         textRange,
         sendAudioParserPattern,
         sendAudioParserAddress);
-    if(!sendAudioParserResolved) {
-        const size_t knownAddress = clientBase + kSendAudioParserRva;
-        if(textRange.Start <= knownAddress && knownAddress < textRange.End) {
-            sendAudioParserAddress = knownAddress;
-            sendAudioParserResolved = true;
-        }
-    }
     if(sendAudioParserResolved) {
         g_OrgSendAudioParser = reinterpret_cast<SendAudioParser_t>(sendAudioParserAddress);
         DetourTransactionBegin();
@@ -3393,14 +3377,18 @@ void MirvPovRadio_Initialize(HMODULE clientDll)
         MIRV_POV_DIAGNOSTIC_WARNING("[mirv_pov_radio] RawAudio formatter pattern was not found uniquely.\n");
     }
 
-    // Hook the typed RawAudio formatter as well as the generic delegate.  The
-    // formatter is where IDA confirms the semantic message offsets
-    // (voice_filename +0x48, entidx +0x58); this is the path that remains
-    // active when demo playback bypasses the delegate's typed callback.
-    const size_t rawAudioFormatterAddress = clientBase + kRawAudioFormatterRva;
-    if(textRange.Start <= rawAudioFormatterAddress
-        && rawAudioFormatterAddress < textRange.End
-        && rawAudioFormatterAddress != rawAudioAddress) {
+    // IDA Pro (client.dll 2026-08-25): the typed RawAudio formatter carries
+    // voice_filename at +0x48 and entidx at +0x58. Resolve it by signature so
+    // an update cannot silently turn the old RVA into a different function.
+    const char * rawAudioFormatterPattern =
+        "48 8B C4 53 48 81 EC A0 00 00 00 "
+        "48 8B 4A 48 44 8B 42 50 48 83 E1 FC 8B 5A 58";
+    size_t rawAudioFormatterAddress = 0;
+    const bool rawAudioFormatterResolved = FindUniquePattern(
+        textRange,
+        rawAudioFormatterPattern,
+        rawAudioFormatterAddress);
+    if(rawAudioFormatterResolved && rawAudioFormatterAddress != rawAudioAddress) {
         g_OrgRawAudioFormatter = reinterpret_cast<RawAudioHandler_t>(rawAudioFormatterAddress);
         DetourTransactionBegin();
         DetourUpdateThread(GetCurrentThread());
@@ -3412,7 +3400,7 @@ void MirvPovRadio_Initialize(HMODULE clientDll)
             MIRV_POV_DIAGNOSTIC_WARNING("[mirv_pov_radio] RawAudio typed formatter detour failed.\n");
         }
     } else {
-        MIRV_POV_DIAGNOSTIC_WARNING("[mirv_pov_radio] RawAudio typed formatter RVA is outside the executable image.\n");
+        MIRV_POV_DIAGNOSTIC_WARNING("[mirv_pov_radio] RawAudio typed formatter pattern was not found uniquely.\n");
     }
 
     g_Hooked = g_RadioTextDispatchHooked || g_RadioTextHooked || g_SendAudioHooked || g_SendAudioEmitterHooked
@@ -3424,7 +3412,7 @@ void MirvPovRadio_Initialize(HMODULE clientDll)
 
 void MirvPovRadio_HandleGameEvent(SOURCESDK::CS2::IGameEvent * event)
 {
-    if(nullptr == event || !HasGameEventHash() || !MirvPov_IsEnabled()) return;
+    if(nullptr == event || !HasGameEventHash() || !MIRV_POV_FEATURE_ACTIVE("radio")) return;
     const char * eventName = event->GetName();
     if(nullptr == eventName) return;
 
@@ -3584,7 +3572,7 @@ void MirvPovRadio_HandleGameEvent(SOURCESDK::CS2::IGameEvent * event)
 
 void MirvPovRadio_HandleSoundEvent(CEntityInstance * sourcePawn, const char * soundName)
 {
-    if(!MirvPov_IsEnabled() || nullptr == soundName) return;
+    if(!MIRV_POV_FEATURE_ACTIVE("radio") || nullptr == soundName) return;
     int mode = GetRadioMode();
     if(4 != mode && 5 != mode && 6 != mode) return;
     strncpy_s(g_LastSoundName, sizeof(g_LastSoundName), soundName, _TRUNCATE);

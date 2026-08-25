@@ -139,7 +139,7 @@ CEntityInstance * __fastcall New_GetHudMoneyPawn()
     CEntityInstance * nativePawn = g_MoneyOrgGetHudMoneyPawn();
     MirvPov_PopHookReturnAddress(previousReturnAddress);
 
-    if(!MirvPov_IsEnabled()
+    if(!MIRV_POV_FEATURE_ACTIVE("killreward")
         || (!g_InMoneyPanelUpdate && !IsMoneyPanelReturnAddress(returnAddress)))
         return nativePawn;
 
@@ -422,7 +422,7 @@ void __fastcall New_TextMsgHandler(void * owner, void * message)
     char token[96];
     char amount[64];
     int destination = -1;
-    bool isKillReward = MirvPov_IsEnabled()
+    bool isKillReward = MIRV_POV_FEATURE_ACTIVE("killreward")
         && IsNativeKillRewardTextMsg(
             message,
             destination,
@@ -1350,7 +1350,7 @@ void MirvPovKillReward_Initialize(HMODULE clientDll)
     }
     if(!g_HudChatDemoBypassAvailable) {
         MIRV_POV_DIAGNOSTIC_WARNING("[mirv_pov_killreward] Common HudChat demo guard patch was not found.\n");
-    } else if(MirvPov_IsEnabled()) {
+    } else if(MIRV_POV_FEATURE_ACTIVE("killreward")) {
         UpdateHudChatDemoBypass(true);
     }
 
@@ -1367,7 +1367,7 @@ void MirvPovKillReward_HandleGameEvent(SOURCESDK::CS2::IGameEvent * event)
         MirvPovKillReward_Reset("round_start");
         return;
     }
-    if(0 != strcmp(name, "player_death") || !MirvPov_IsEnabled()) return;
+    if(0 != strcmp(name, "player_death") || !MIRV_POV_FEATURE_ACTIVE("killreward")) return;
 
     __try {
         auto attackerKey = MakeKey("attacker");
@@ -1457,7 +1457,7 @@ void MirvPovKillReward_OnMoneyUpdate(
         g_LastResolvedPovHandle = resolvedPovControllerHandle;
     int delta = newAccount - oldAccount;
 
-    if(!MirvPov_IsEnabled()
+    if(!MIRV_POV_FEATURE_ACTIVE("killreward")
         || oldAccount < 0
         || delta <= 0) return;
 
@@ -1472,7 +1472,7 @@ void MirvPovKillReward_OnDemoTick(int demoTick)
     }
     g_LastDemoTick = demoTick;
 
-    if(!MirvPov_IsEnabled()) return;
+    if(!MIRV_POV_FEATURE_ACTIVE("killreward")) return;
 
     ULONGLONG now = GetTickCount64();
     PruneQueues(now, demoTick);

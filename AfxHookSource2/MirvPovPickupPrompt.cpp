@@ -160,7 +160,7 @@ CEntityInstance * __fastcall GetPickupHintPawn()
 char __fastcall BuildActiveWeaponIdHint(void * targetIdHud, void * hint)
 {
     if(nullptr == g_BuildNativeActiveWeaponIdHint) return 0;
-    if(!g_Ready.load(std::memory_order_acquire) || !MirvPov_IsEnabled()) {
+    if(!g_Ready.load(std::memory_order_acquire) || !MIRV_POV_FEATURE_ACTIVE("pickupprompt")) {
         return g_BuildNativeActiveWeaponIdHint(targetIdHud, hint);
     }
 

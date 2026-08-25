@@ -42,7 +42,7 @@ CEntityInstance * __fastcall GetTeamIdContextPlayer()
         ? g_GetNativeTeamIdContextPlayer()
         : nullptr;
 
-    if(!MirvPov_IsEnabled()) return nativePlayer;
+    if(!MIRV_POV_FEATURE_ACTIVE("teamid")) return nativePlayer;
 
     __try {
         if(IsSpectatorXrayEnabled()) return nativePlayer;

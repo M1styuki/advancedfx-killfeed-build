@@ -288,7 +288,7 @@ static bool MirvPovHud_ShouldShowBuyZoneIcon(CEntityInstance * povPawn) {
 }
 
 static void MirvPovHud_RefreshBuyZoneIcon() {
-    if(!MirvPov_IsEnabled()) return;
+    if(!MIRV_POV_FEATURE_ACTIVE("hud")) return;
 
     auto hudPanel = MirvPovHud_GetHudPanel();
     if(!hudPanel) return;
@@ -339,7 +339,7 @@ void MirvPovHud_OnPanoramaLayoutFileLoaded(const char* filePath) {
         MirvPovHud_RefreshPanelState();
     } else if(0 == strcmp("panorama\\layout\\hud\\hudlegend.xml", filePath)) {
         MirvPovHud_ResetPanelState();
-        if(MirvPov_IsEnabled()) MirvPovHud_RefreshPanelState();
+        if(MIRV_POV_FEATURE_ACTIVE("hud")) MirvPovHud_RefreshPanelState();
     }
 }
 
@@ -385,7 +385,7 @@ void MirvPovHud_OnLevelInitPreEntity() {
 
 void MirvPovHud_ReapplyPanelState() {
     MirvPovHud_RefreshPanelState();
-    if(MirvPov_IsEnabled()) {
+    if(MIRV_POV_FEATURE_ACTIVE("hud")) {
         // Reapply the existing Demo-card background/avatar state after native
         // observer updates.
         MirvPovHud_HideSpecPlayerPanel();
@@ -432,7 +432,7 @@ static bool __fastcall New_FlashViewPredicate() {
     bool result = g_OrgFlashViewPredicate();
     MirvPov_PopHookReturnAddress(previousReturnAddress);
 
-    if(!g_FlashHooksActive || !MirvPov_IsEnabled()) return result;
+    if(!g_FlashHooksActive || !MIRV_POV_FEATURE_ACTIVE("hud")) return result;
     if(returnAddress == g_FlashViewPredicateReturnAddresses[0]
         || returnAddress == g_FlashViewPredicateReturnAddresses[1]) return false;
     return result;

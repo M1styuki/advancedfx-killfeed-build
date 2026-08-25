@@ -195,20 +195,73 @@ static void MirvPov_LoadVoiceScript()
 {
 	std::filesystem::path path(GetHlaeFolder());
 	path /= "resources\\AfxHookSource2\\snippets\\mirv_script_voice.js";
-	AfxHookSourceRs_Engine_Load(path.string().c_str());
+    AfxHookSourceRs_Engine_Load(path.string().c_str());
 }
+
+#if AFX_MIRV_POV_DIAGNOSTICS
+CON_COMMAND(mirv_pov_debug_feature, "Configure a mirv_pov feature for the next enable cycle.")
+{
+    const int argc = args->ArgC();
+    if(1 == argc) {
+        MirvPovDebug_PrintFeatureStates();
+        return;
+    }
+
+    if(3 == argc) {
+        const char * feature = args->ArgV(1);
+        const char * value = args->ArgV(2);
+        const bool enable = 0 == strcmp(value, "1")
+            || 0 == _stricmp(value, "on")
+            || 0 == _stricmp(value, "true");
+        const bool disable = 0 == strcmp(value, "0")
+            || 0 == _stricmp(value, "off")
+            || 0 == _stricmp(value, "false");
+        const bool all = 0 == _stricmp(feature, "all");
+
+        if(!enable && !disable) {
+            advancedfx::Warning("mirv_pov_debug_feature: value must be 0 or 1.\n");
+            return;
+        }
+        if(!all && !MirvPovDebug_HasFeature(feature)) {
+            advancedfx::Warning("mirv_pov_debug_feature: unknown feature '%s'.\n", feature);
+            MirvPovDebug_PrintFeatureStates();
+            return;
+        }
+        if(MirvPovDebug_SetFeatureEnabled(feature, enable)) {
+            advancedfx::Message(
+                "mirv_pov_debug_feature %s %d%s.\n",
+                feature,
+                enable ? 1 : 0,
+                MirvPov_IsEnabled() ? " (pending: run mirv_pov 0, then mirv_pov 1)" : "");
+            return;
+        }
+    }
+
+    advancedfx::Message(
+        "Usage: mirv_pov_debug_feature <feature|all> <0|1>\n"
+        "Changes made while enabled apply after mirv_pov 0, then mirv_pov 1.\n");
+    MirvPovDebug_PrintFeatureStates();
+}
+#endif
 
 CON_COMMAND(mirv_pov, "POV HUD with radar, feedback, and native pickup prompts. Offline demo playback only.")
 {
 	int argc = args->ArgC();
 	if(2 == argc) {
 		const char * arg1 = args->ArgV(1);
-		if(0 == _stricmp(arg1, "true") || 0 == _stricmp(arg1, "1") || 0 == _stricmp(arg1, "on")) {
-			HMODULE hClient = GetModuleHandleW(L"client.dll");
-			MirvPov_LoadVoiceScript();
-			MirvPov_ApplyCvarSettings();
-			MirvPovTeamID_ApplyPatches(hClient);
-					MirvPov_Enable(hClient);
+				if(0 == _stricmp(arg1, "true") || 0 == _stricmp(arg1, "1") || 0 == _stricmp(arg1, "on")) {
+					HMODULE hClient = GetModuleHandleW(L"client.dll");
+					#if AFX_MIRV_POV_DIAGNOSTICS
+					if(!MirvPov_IsEnabled()) MirvPovDebug_ApplyFeatureConfiguration();
+					if(MirvPovDebug_IsFeatureEnabled("voice_script")) MirvPov_LoadVoiceScript();
+				if(MirvPovDebug_IsFeatureEnabled("cvars")) MirvPov_ApplyCvarSettings();
+				if(MirvPovDebug_IsFeatureEnabled("teamid")) MirvPovTeamID_ApplyPatches(hClient);
+				#else
+				MirvPov_LoadVoiceScript();
+				MirvPov_ApplyCvarSettings();
+				MirvPovTeamID_ApplyPatches(hClient);
+				#endif
+						MirvPov_Enable(hClient);
 					advancedfx::Message("mirv_pov enabled. Use mp_forcecamera 0 for cross-team switching.\n");
 					#if AFX_MIRV_POV_DIAGNOSTICS
 					advancedfx::Message(

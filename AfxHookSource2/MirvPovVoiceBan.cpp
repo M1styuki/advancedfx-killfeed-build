@@ -170,7 +170,7 @@ bool TryClearBlockedState(__int64 voiceStatus, uint64_t steamId)
 
 void Update()
 {
-    bool enabled = MirvPov_IsEnabled() || g_Enabled;
+    bool enabled = MIRV_POV_FEATURE_ACTIVE("voiceban") || g_Enabled;
     if(!SetPatch(enabled)) return;
     if(!enabled) {
         g_ClearedSteamIds.clear();

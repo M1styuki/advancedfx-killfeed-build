@@ -45,7 +45,7 @@ thread_local TargetRelation g_TargetRelation = TargetRelation::Unknown;
 
 TargetRelation ClassifyPlayerState(const void * playerState)
 {
-    if(!MirvPov_IsEnabled() || nullptr == playerState
+    if(!MIRV_POV_FEATURE_ACTIVE("teamhealth") || nullptr == playerState
         || nullptr == g_GetPlayerControllerFromSlot) return TargetRelation::Unknown;
 
     __try {
@@ -95,7 +95,7 @@ bool IsListedReturnAddress(void * address, void * const * addresses, size_t coun
 
 bool __fastcall New_BuilderVisibilityFlag()
 {
-    if(MirvPov_IsEnabled()
+    if(MIRV_POV_FEATURE_ACTIVE("teamhealth")
         && TargetRelation::Enemy == g_TargetRelation
         && IsListedReturnAddress(
             _ReturnAddress(),
@@ -108,7 +108,7 @@ bool __fastcall New_BuilderVisibilityFlag()
 
 bool __fastcall New_ObserverVisibilityGate(void * controller)
 {
-    if(MirvPov_IsEnabled()
+    if(MIRV_POV_FEATURE_ACTIVE("teamhealth")
         && TargetRelation::Enemy == g_TargetRelation
         && IsListedReturnAddress(
             _ReturnAddress(),
@@ -133,7 +133,7 @@ CEntityInstance * __fastcall New_GetLocalPlayerController()
     void * returnAddress = MirvPov_GetHookReturnAddress();
     CEntityInstance * nativeController = g_OrgGetLocalPlayerController();
     MirvPov_PopHookReturnAddress(previousReturnAddress);
-    if(!MirvPov_IsEnabled()
+    if(!MIRV_POV_FEATURE_ACTIVE("teamhealth")
         || TargetRelation::Unknown == g_TargetRelation) return nativeController;
 
     int contextIndex = GetTeamCounterContextIndex(returnAddress);

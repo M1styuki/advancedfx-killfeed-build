@@ -289,7 +289,7 @@ void MirvPovScoreboard_Reset()
 
 void MirvPovScoreboard_Update()
 {
-    if(!MirvPov_IsEnabled() || !g_ScoreboardSyncEnabled || MirvPovHud_ShouldSuppressFrame()) {
+    if(!MIRV_POV_FEATURE_ACTIVE("scoreboard") || !g_ScoreboardSyncEnabled || MirvPovHud_ShouldSuppressFrame()) {
         SetScoreboardOpen(false);
         return;
     }

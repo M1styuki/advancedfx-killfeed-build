@@ -161,7 +161,7 @@ static bool MirvPov_IsVoicePlayerSlotOnWatchedTeam(unsigned int playerSlot) {
 }
 
 void MirvPov_UpdateVoiceTeam() {
-    if(!g_MirvPovVoiceEnabled || !MirvPov_IsEnabled()) return;
+    if(!g_MirvPovVoiceEnabled || !MIRV_POV_FEATURE_ACTIVE("voice")) return;
 
     CEntityInstance * watchedController = GetCurrentPovPlayerController();
     if(nullptr == watchedController || !watchedController->IsPlayerController()) return;
@@ -195,7 +195,7 @@ static bool New_MirvPov_IsPlayingDemo(void * This) {
     void * ret = _ReturnAddress();
     bool result = g_Org_MirvPov_IsPlayingDemo(This);
     if(g_MirvPovVoiceEnabled
-        && MirvPov_IsEnabled()
+        && MIRV_POV_FEATURE_ACTIVE("voice")
         && g_MirvPovShowSpeakerRetAddr
         && (size_t)ret == g_MirvPovShowSpeakerRetAddr) return false;
     return result;
@@ -207,7 +207,7 @@ static __int64 __fastcall New_MirvPov_ServerVoiceData(__int64 This, __int64 msg)
     if(0 == g_MirvPovVoiceClearRenderPasses
         && playerSlot < 64
         && g_MirvPovVoiceEnabled
-        && MirvPov_IsEnabled()
+        && MIRV_POV_FEATURE_ACTIVE("voice")
         && MirvPov_IsVoicePlayerSlotOnWatchedTeam(playerSlot)) {
         MirvPov_SetSyntheticSpeaking(playerSlot, true);
     }
@@ -289,14 +289,14 @@ static void MirvPov_UpdateVoiceRuntime() {
 }
 
 void MirvPov_UpdateVoiceHud() {
-    if(!g_MirvPovVoiceEnabled || !MirvPov_IsEnabled()) return;
+    if(!g_MirvPovVoiceEnabled || !MIRV_POV_FEATURE_ACTIVE("voice")) return;
     MirvPov_UpdateVoiceTeam();
     MirvPov_UpdateVoiceRuntime();
 }
 
 void MirvPovVoice_OnRenderPass()
 {
-    if(g_MirvPovVoiceEnabled && MirvPov_IsEnabled()) {
+    if(g_MirvPovVoiceEnabled && MIRV_POV_FEATURE_ACTIVE("voice")) {
         MirvPov_UpdateVoiceTeam();
         MirvPov_UpdateVoiceRuntime();
     }
@@ -329,7 +329,7 @@ void MirvPovVoice_SetEnabled(bool enabled)
     g_MirvPovVoiceEnabled = enabled;
     MirvPov_ResetVoiceHud();
 
-    if(enabled && MirvPov_IsEnabled()) {
+    if(enabled && MIRV_POV_FEATURE_ACTIVE("voice")) {
         MirvPov_HookVoiceHud(GetModuleHandleW(L"client.dll"));
         MirvPov_UpdateVoiceTeam();
     }

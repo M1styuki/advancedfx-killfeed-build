@@ -93,7 +93,7 @@ constexpr uint8_t kPopRegisters[] = {
 
 bool ShouldApplyRadarOverrides()
 {
-    return MirvPov_IsEnabled();
+    return MIRV_POV_FEATURE_ACTIVE("radar");
 }
 
 uint64_t __fastcall AdjustRadarPlayerStyle(uint64_t style)
