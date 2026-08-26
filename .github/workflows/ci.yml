@@ -49,7 +49,7 @@ jobs:
           cmake --install build/x64-release --config Release --prefix build/staging-release --component x64-runtime
           cmake --install build/x64-release --config Release --prefix build/staging-release --component x64-source2
 
-      - name: Prepare AfxHookSource2.dll
+      - name: Prepare licensed binary and corresponding source
         shell: pwsh
         run: |
           $staging = Join-Path $env:GITHUB_WORKSPACE "build/staging-release"
@@ -72,9 +72,50 @@ jobs:
           if ($null -eq $source) {
             throw "Could not find AfxHookSource2.dll in $staging. Checked: $($candidates -join ', ')"
           }
-          Copy-Item -LiteralPath $source -Destination (Join-Path $release "AfxHookSource2.dll")
 
-      - name: Upload DLL artifact
+          $shortSha = $env:GITHUB_SHA.Substring(0, 12)
+          $binaryRoot = Join-Path $env:RUNNER_TEMP "AfxHookSource2-$shortSha-windows-x64"
+          New-Item -ItemType Directory -Force -Path $binaryRoot | Out-Null
+          Copy-Item -LiteralPath $source -Destination (Join-Path $binaryRoot "AfxHookSource2.dll")
+          Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE "LICENSE") -Destination $binaryRoot
+          Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE "NOTICE.md") -Destination $binaryRoot
+          Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE "LICENSES") -Destination $binaryRoot -Recurse
+          Copy-Item -LiteralPath (Join-Path $env:GITHUB_WORKSPACE "AfxHookSource2/MIRV_POV_LICENSE.md") -Destination $binaryRoot
+
+          $thirdPartyRoot = Join-Path $binaryRoot "THIRD_PARTY_LICENSES"
+          Get-ChildItem -LiteralPath (Join-Path $env:GITHUB_WORKSPACE "deps/release") -Recurse -File |
+            Where-Object { $_.Name -match '^(LICENSE|COPYING|NOTICE)(\.|$)' } |
+            ForEach-Object {
+              $relative = [System.IO.Path]::GetRelativePath($env:GITHUB_WORKSPACE, $_.FullName)
+              $destination = Join-Path $thirdPartyRoot $relative
+              New-Item -ItemType Directory -Force -Path (Split-Path $destination) | Out-Null
+              Copy-Item -LiteralPath $_.FullName -Destination $destination
+            }
+
+          $binaryArchive = Join-Path $release "AfxHookSource2-$shortSha-windows-x64.zip"
+          Compress-Archive -Path (Join-Path $binaryRoot "*") -DestinationPath $binaryArchive
+
+          $sourceRoot = Join-Path $env:RUNNER_TEMP "AfxHookSource2-$shortSha-source"
+          New-Item -ItemType Directory -Force -Path $sourceRoot | Out-Null
+          git ls-files --recurse-submodules | ForEach-Object {
+            $sourcePath = Join-Path $env:GITHUB_WORKSPACE $_
+            if (Test-Path -LiteralPath $sourcePath -PathType Leaf) {
+              $destination = Join-Path $sourceRoot $_
+              New-Item -ItemType Directory -Force -Path (Split-Path $destination) | Out-Null
+              Copy-Item -LiteralPath $sourcePath -Destination $destination
+            }
+          }
+          @(
+            "Repository commit: $env:GITHUB_SHA"
+            ""
+            "Submodules:"
+            (git submodule status --recursive)
+          ) | Set-Content -LiteralPath (Join-Path $sourceRoot "SOURCE-COMMIT.txt") -Encoding utf8
+
+          $sourceArchive = Join-Path $release "AfxHookSource2-$shortSha-source.zip"
+          Compress-Archive -Path (Join-Path $sourceRoot "*") -DestinationPath $sourceArchive
+
+      - name: Upload licensed release artifacts
         uses: actions/upload-artifact@v4
         with:
           name: AfxHookSource2-${{ github.sha }}
@@ -91,7 +132,7 @@ jobs:
       contents: write
 
     steps:
-      - name: Download DLL assets
+      - name: Download licensed release assets
         uses: actions/download-artifact@v4
         with:
           name: AfxHookSource2-${{ github.sha }}
@@ -102,11 +143,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: prerelease-${{ github.run_number }}-${{ github.sha }}
           RELEASE_TITLE: AfxHookSource2 prerelease ${{ github.sha }}
+          RELEASE_LICENSE_NOTICE: This AfxHookSource2 binary includes the AGPL-3.0-only mirv_pov feature. Download the matching source archive beside the binary archive for the complete corresponding source; separate AdvancedFX and third-party source retains its original license.
         run: |
-          gh release create "$RELEASE_TAG" release/AfxHookSource2.dll \
+          gh release create "$RELEASE_TAG" release/*.zip \
             --repo "$GITHUB_REPOSITORY" \
             --title "$RELEASE_TITLE" \
             --target "$GITHUB_SHA" \
+            --notes "$RELEASE_LICENSE_NOTICE" \
             --prerelease \
             --latest=false \
             --generate-notes
@@ -120,7 +163,7 @@ jobs:
       contents: write
 
     steps:
-      - name: Download DLL assets
+      - name: Download licensed release assets
         uses: actions/download-artifact@v4
         with:
           name: AfxHookSource2-${{ github.sha }}
@@ -130,14 +173,16 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_LICENSE_NOTICE: This AfxHookSource2 binary includes the AGPL-3.0-only mirv_pov feature. Download the matching source archive beside the binary archive for the complete corresponding source; separate AdvancedFX and third-party source retains its original license.
         run: |
           if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release upload "$RELEASE_TAG" release/AfxHookSource2.dll --repo "$GITHUB_REPOSITORY" --clobber
+            gh release upload "$RELEASE_TAG" release/*.zip --repo "$GITHUB_REPOSITORY" --clobber
             gh release edit "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --prerelease=false --latest=true
           else
-            gh release create "$RELEASE_TAG" release/AfxHookSource2.dll \
+            gh release create "$RELEASE_TAG" release/*.zip \
               --repo "$GITHUB_REPOSITORY" \
               --title "AfxHookSource2 $RELEASE_TAG" \
+              --notes "$RELEASE_LICENSE_NOTICE" \
               --verify-tag \
               --latest=true \
               --generate-notes

@@ -83,7 +83,15 @@ Further changelog entries can be found in the changelog XML files included in th
 
 ## License
 
-This repository contains the parts of advancedfx project that are under MIT license. Please note: **the license does not apply to submodules**.
+This repository remains under the AdvancedFX MIT license by default. The
+`mirv_pov` feature and its integration modifications are licensed under GNU
+Affero General Public License version 3 only (`AGPL-3.0-only`). See
+[AfxHookSource2/MIRV_POV_LICENSE.md](AfxHookSource2/MIRV_POV_LICENSE.md) and
+[NOTICE.md](NOTICE.md) for the exact scope.
+
+A distributed `AfxHookSource2.dll` containing `mirv_pov` is a combined binary
+and is conveyed under `AGPL-3.0-only`. Separate AdvancedFX and third-party
+source material retains its original license.
 
 ## How to build
 
