@@ -198,6 +198,31 @@ static void MirvPov_LoadVoiceScript()
     AfxHookSourceRs_Engine_Load(path.string().c_str());
 }
 
+CON_COMMAND(mirv_pov_teamid_debug, "Enable rate-limited mirv_pov TeamID diagnostics.")
+{
+    const int argc = args->ArgC();
+    if(1 == argc) {
+        advancedfx::Message(
+            "mirv_pov_teamid_debug is %d.\nUsage: mirv_pov_teamid_debug <0|1>\n",
+            MirvPovTeamID_GetDebug() ? 1 : 0);
+        return;
+    }
+
+    if(2 == argc) {
+        const char * value = args->ArgV(1);
+        if(0 == strcmp(value, "1") || 0 == _stricmp(value, "on") || 0 == _stricmp(value, "true")) {
+            MirvPovTeamID_SetDebug(true);
+            return;
+        }
+        if(0 == strcmp(value, "0") || 0 == _stricmp(value, "off") || 0 == _stricmp(value, "false")) {
+            MirvPovTeamID_SetDebug(false);
+            return;
+        }
+    }
+
+    advancedfx::Message("Usage: mirv_pov_teamid_debug <0|1>\n");
+}
+
 #if AFX_MIRV_POV_DIAGNOSTICS
 CON_COMMAND(mirv_pov_debug_feature, "Configure a mirv_pov feature for the next enable cycle.")
 {
