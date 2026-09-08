@@ -322,6 +322,17 @@ bool MirvPovVoice_IsEnabled()
     return g_MirvPovVoiceEnabled;
 }
 
+void MirvPovVoice_ResetDemoState()
+{
+    // Resetting hadDemoFile first would bypass the disconnect clear in
+    // UpdateVoiceRuntime, leaving the previous demo's queued voice audio.
+    if(g_MirvPovVoiceHadDemoFile && g_pEngineToClient) {
+        g_pEngineToClient->ExecuteClientCmd(0, "servervoice_clear", true);
+    }
+    MirvPov_ResetVoiceHud();
+    memset(g_MirvPovSyntheticSpeakingUntil, 0, sizeof(g_MirvPovSyntheticSpeakingUntil));
+}
+
 void MirvPovVoice_SetEnabled(bool enabled)
 {
     if(g_MirvPovVoiceEnabled == enabled) return;

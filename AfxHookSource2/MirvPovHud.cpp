@@ -189,7 +189,7 @@ static void MirvPovHud_RefreshTeamCounterPlayerNames() {
         Panorama_HasPanelClass(hudPanel, "ROUNDDOWNTIME"));
 }
 
-static bool MirvPovHud_SetStrokeSiblingVisibleForAnchor(unsigned char* parentPanel, const char* anchorId) {
+static bool MirvPovHud_SetStrokeSiblingVisibleForAnchor(unsigned char* parentPanel, const char* anchorId, bool visible) {
     if(!parentPanel) return false;
 
     const auto children = parentPanel + CS2::PanoramaUIPanel::children;
@@ -206,23 +206,23 @@ static bool MirvPovHud_SetStrokeSiblingVisibleForAnchor(unsigned char* parentPan
 
         if(-1 != anchorChild) {
             const auto strokePanel = ((unsigned char***)children)[1][1 - anchorChild];
-            if(MirvPovHud_SetPanelVisible(strokePanel, true)) return true;
+            if(MirvPovHud_SetPanelVisible(strokePanel, visible)) return true;
         }
     }
 
     for(int i = 0; i < childCount; ++i) {
-        if(MirvPovHud_SetStrokeSiblingVisibleForAnchor(((unsigned char***)children)[1][i], anchorId)) return true;
+        if(MirvPovHud_SetStrokeSiblingVisibleForAnchor(((unsigned char***)children)[1][i], anchorId, visible)) return true;
     }
 
     return false;
 }
 
-static void MirvPovHud_ShowHealthAmmoCenterStrokes() {
+static void MirvPovHud_SetHealthAmmoCenterStrokesVisible(bool visible) {
     auto hudPanel = MirvPovHud_GetHudPanel();
     if(!hudPanel) return;
 
-    MirvPovHud_SetStrokeSiblingVisibleForAnchor(hudPanel, "hud-HA-main");
-    MirvPovHud_SetStrokeSiblingVisibleForAnchor(hudPanel, "hud-WPN-main");
+    MirvPovHud_SetStrokeSiblingVisibleForAnchor(hudPanel, "hud-HA-main", visible);
+    MirvPovHud_SetStrokeSiblingVisibleForAnchor(hudPanel, "hud-WPN-main", visible);
 }
 
 static bool MirvPovHud_HideSpecPlayerPanel() {
@@ -358,6 +358,7 @@ static void MirvPovHud_ResetPanelState() {
 }
 
 static void MirvPovHud_RefreshPanelState() {
+    if(!MIRV_POV_FEATURE_ACTIVE("hud")) return;
     __try {
         auto hudPanel = MirvPovHud_GetHudPanel();
         if(hudPanel != g_LastHudPanel) {
@@ -369,7 +370,7 @@ static void MirvPovHud_RefreshPanelState() {
         if(!g_HudPanelStateNeedsRefresh || !hudPanel) return;
 
         const bool specPlayerHidden = MirvPovHud_HideSpecPlayerPanel();
-        MirvPovHud_ShowHealthAmmoCenterStrokes();
+        MirvPovHud_SetHealthAmmoCenterStrokesVisible(true);
         MirvPovHud_SetSpectatorHotKeyLabelsVisible(false);
         g_HudPanelStateNeedsRefresh = !specPlayerHidden;
     } __except(EXCEPTION_EXECUTE_HANDLER) {
@@ -442,6 +443,7 @@ void MirvPovHud_ReapplyPanelState() {
 }
 
 void MirvPovHud_UpdateSeekDetection(int curTick) {
+    if(!MIRV_POV_FEATURE_ACTIVE("hud")) return;
     MirvPovHud_SetSpectatorHotKeyLabelsVisible(false);
 
     if(g_LastDemoTick >= 0) {
@@ -529,21 +531,6 @@ static bool MirvPovHud_InstallFlashPredicateHook(HMODULE clientDll) {
     return true;
 }
 
-static void MirvPovHud_RemoveFlashPredicateHook() {
-    if(!g_bFlashViewPredicateHooked || nullptr == g_OrgFlashViewPredicate) return;
-
-    DetourTransactionBegin();
-    DetourUpdateThread(GetCurrentThread());
-    DetourDetach(&(PVOID &)g_OrgFlashViewPredicate, New_FlashViewPredicate);
-    if(NO_ERROR != DetourTransactionCommit()) {
-        MIRV_POV_DIAGNOSTIC_WARNING("[mirv_pov_flash] Flash view predicate Detour removal failed.\n");
-        return;
-    }
-
-    g_bFlashViewPredicateHooked = false;
-    g_OrgFlashViewPredicate = nullptr;
-}
-
 void MirvPovHud_ApplyPatches(HMODULE clientDll) {
     if(nullptr == clientDll) {
         MIRV_POV_DIAGNOSTIC_WARNING("[mirv_pov_hud] client.dll is not loaded.\n");
@@ -561,9 +548,16 @@ void MirvPovHud_ApplyPatches(HMODULE clientDll) {
 
 void MirvPovHud_RemovePatches() {
     g_FlashHooksActive = false;
-    MirvPovHud_RemoveFlashPredicateHook();
-    g_FlashViewPredicateReturnAddresses[0] = nullptr;
-    g_FlashViewPredicateReturnAddresses[1] = nullptr;
+    // TeamHealth hooks this same predicate. Keep the detour chain installed;
+    // inactive wrappers pass through instead of detaching beneath another hook.
+    __try {
+        auto hudPanel = MirvPovHud_GetHudPanel();
+        if(hudPanel) {
+            MirvPovHud_SetPanelVisible(MirvPovHud_FindPanelById(hudPanel, "jsHudSpecplayer__Bg"), true);
+            MirvPovHud_SetPanelVisible(MirvPovHud_FindPanelById(hudPanel, "HudSpecplayer__Avatar"), true);
+            MirvPovHud_SetHealthAmmoCenterStrokesVisible(false);
+        }
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
     MirvPovHud_SetSpectatorHotKeyLabelsVisible(true);
     MirvPovHud_SetTeamCounterPlayerNamesVisible(true);
     MirvPovHud_ResetPanelState();

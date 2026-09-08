@@ -3861,6 +3861,20 @@ void MirvPovRadio_Reset(const char * reason)
     strncpy_s(g_LastAgentFamily, sizeof(g_LastAgentFamily), "none", _TRUNCATE);
 }
 
+void MirvPovRadio_ResetDemoState()
+{
+    MirvPovRadio_Reset("demo changed");
+    g_LastNativeClientIndex = -1;
+    g_LastNativeRadioTimeMs = 0;
+    strncpy_s(g_LastSoundName, sizeof(g_LastSoundName), "none", _TRUNCATE);
+    strncpy_s(g_LastSendAudioToken, sizeof(g_LastSendAudioToken), "none", _TRUNCATE);
+    // Keep this separate from round_start reset: that event can reach both
+    // event-manager detours and must still be deduplicated within one demo.
+    g_LastGameEventPointer = nullptr;
+    g_LastGameEventTimeMs = 0;
+    strncpy_s(g_LastGameEventName, sizeof(g_LastGameEventName), "none", _TRUNCATE);
+}
+
 bool MirvPovRadio_IsAvailable()
 {
     bool commonNativePath = MirvPovKillReward_IsHudChatDemoBypassAvailable();

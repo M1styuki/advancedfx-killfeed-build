@@ -329,12 +329,14 @@ void MirvPovDeathCam_UpdateDemoTick(int demoTick)
         const int delta = demoTick - previous;
         if(delta < 0 || delta > 2) {
             MirvPovDeathCam_Reset();
+            g_LastDemoTick.store(demoTick, std::memory_order_release);
         }
     }
 }
 
 void MirvPovDeathCam_Reset()
 {
+    g_LastDemoTick.store(-1, std::memory_order_release);
     g_DeathActive.store(false, std::memory_order_release);
     g_EventTargetHandle.store(0xFFFFFFFFu, std::memory_order_release);
     g_EventHeadshot.store(false, std::memory_order_release);

@@ -311,6 +311,18 @@ void __fastcall New_DoStartSoundEvent(void * soundOpGameSystem, void * netMessag
 
 } // namespace
 
+void MirvPovSoundCircle_ResetDemoState()
+{
+    // Hooks belong to client.dll, but producer observations and sound-op
+    // objects belong to the demo that supplied them.
+    g_NativeProducerSeen.store(false);
+    AcquireSRWLockExclusive(&g_SyntheticSoundLock);
+    g_LastSoundOpGameSystem = nullptr;
+    memset(g_LastSoundMessageTemplate, 0, sizeof(g_LastSoundMessageTemplate));
+    g_LastSoundMessageTemplateValid = false;
+    ReleaseSRWLockExclusive(&g_SyntheticSoundLock);
+}
+
 void MirvPovSoundCircle_Initialize(HMODULE clientDll)
 {
     if(g_Hooked || nullptr == clientDll) return;

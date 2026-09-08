@@ -4,6 +4,7 @@
 
 #include "ClientEntitySystem.h"
 #include "MirvPovCore.h"
+#include "../deps/release/prop/cs2/sdk_src/public/igameevents.h"
 
 #include "../shared/AfxConsole.h"
 #include "../shared/binutils.h"
@@ -24,6 +25,7 @@ using BuildPlayerData_t = void (__fastcall *)(void *, void *, const void *, int)
 using PresentPlayerData_t = void (__fastcall *)(void *, const void *, void *);
 using BuilderVisibilityFlag_t = bool (__fastcall *)();
 using ObserverVisibilityGate_t = bool (__fastcall *)(void *);
+using SetDialogVariableInt_t = void (__fastcall *)(void *, const SOURCESDK::CS2::CKV3MemberName &, int);
 
 enum class TargetRelation {
     Unknown,
@@ -41,6 +43,7 @@ void * g_ContextReturnAddresses[4] = {};
 void * g_BuilderVisibilityReturnAddresses[5] = {};
 void * g_ObserverGateReturnAddresses[3] = {};
 bool g_Hooked = false;
+SetDialogVariableInt_t g_SetDialogVariableInt = nullptr;
 thread_local TargetRelation g_TargetRelation = TargetRelation::Unknown;
 
 constexpr size_t kPlayerStateSize = 0x38;
@@ -51,6 +54,7 @@ constexpr size_t kPlayerDataHealthOffset = 0x0c;
 volatile LONG g_EnemyHealthSanitizeLogged = 0;
 volatile LONG g_HitLogMask = 0;
 volatile LONG g_ClassificationDetailLogged = 0;
+volatile LONG g_EnemyHealthPublishLogged = 0;
 
 const char * GetRelationName(TargetRelation relation)
 {
@@ -181,6 +185,21 @@ void __fastcall New_PresentPlayerData(void * teamCounter, const void * playerSta
     // mirv_pov was enabled or retained across a demo seek.
     if(MIRV_POV_FEATURE_ACTIVE("teamhealth")) SanitizeEnemyPlayerData(output);
     g_OrgPresentPlayerData(teamCounter, playerState, output);
+    // The native equipment presenter returns before publishing health for an
+    // enemy in POV mode. A row previously displayed in spectator mode can thus
+    // retain its old Panorama value even though its cached health is now zero.
+    if(TargetRelation::Enemy == g_TargetRelation && g_SetDialogVariableInt && playerState) {
+        __try {
+            void * avatarPanel = *reinterpret_cast<void * const *>(
+                reinterpret_cast<const uint8_t *>(playerState) + 0x10);
+            if(avatarPanel) {
+                const SOURCESDK::CS2::CKV3MemberName healthKey(static_cast<int>(0x9aa70a58u), -1, "health");
+                g_SetDialogVariableInt(avatarPanel, healthKey, 0);
+                if(0 == InterlockedCompareExchange(&g_EnemyHealthPublishLogged, 1, 0))
+                    MIRV_POV_DIAGNOSTIC_MESSAGE("[mirv_pov_team_health] Enemy health published: 0.\n");
+            }
+        } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    }
     g_TargetRelation = previous;
 }
 
@@ -194,15 +213,21 @@ bool IsListedReturnAddress(void * address, void * const * addresses, size_t coun
 
 bool __fastcall New_BuilderVisibilityFlag()
 {
+    void * previousReturnAddress = MirvPov_PushHookReturnAddress(_ReturnAddress());
+    void * returnAddress = MirvPov_GetHookReturnAddress();
+    MirvPov_PopHookReturnAddress(previousReturnAddress);
     if(MIRV_POV_FEATURE_ACTIVE("teamhealth")
         && TargetRelation::Enemy == g_TargetRelation
         && IsListedReturnAddress(
-            _ReturnAddress(),
+            returnAddress,
             g_BuilderVisibilityReturnAddresses,
             _countof(g_BuilderVisibilityReturnAddresses))) {
         return false;
     }
-    return g_OrgBuilderVisibilityFlag();
+    previousReturnAddress = MirvPov_PushHookReturnAddress(returnAddress);
+    bool result = g_OrgBuilderVisibilityFlag();
+    MirvPov_PopHookReturnAddress(previousReturnAddress);
+    return result;
 }
 
 bool __fastcall New_ObserverVisibilityGate(void * controller)
@@ -271,6 +296,10 @@ bool ResolveCallTarget(
 
 void MirvPovTeamHealth_Initialize(HMODULE clientDll)
 {
+    InterlockedExchange(&g_HitLogMask, 0);
+    InterlockedExchange(&g_EnemyHealthSanitizeLogged, 0);
+    InterlockedExchange(&g_ClassificationDetailLogged, 0);
+    InterlockedExchange(&g_EnemyHealthPublishLogged, 0);
     if(g_Hooked || nullptr == clientDll) return;
 
     Afx::BinUtils::MemRange textRange = Afx::BinUtils::MemRange::FromEmpty();
@@ -309,6 +338,19 @@ void MirvPovTeamHealth_Initialize(HMODULE clientDll)
 
     uint8_t * builder = reinterpret_cast<uint8_t *>(builderSequence.Start);
     uint8_t * presentation = reinterpret_cast<uint8_t *>(presentationSequence.Start);
+
+    // Validate the native `health` publication, including the member hash,
+    // before reusing its helper and avatar-panel offset on cached rows.
+    const uint8_t healthPublishPrefix[] = {0x4d, 0x63, 0x47, 0x0c};
+    const uint8_t healthMemberHash[] = {0xc7, 0x44, 0x24, 0x38, 0x58, 0x0a, 0xa7, 0x9a};
+    uint8_t * healthSetter = nullptr;
+    if(0 != memcmp(presentation + 0x308, healthPublishPrefix, sizeof(healthPublishPrefix))
+        || 0 != memcmp(presentation + 0x321, healthMemberHash, sizeof(healthMemberHash))
+        || !ResolveCallTarget(presentation + 0x329, textRange, healthSetter)) {
+        MIRV_POV_DIAGNOSTIC_WARNING("[mirv_pov_team_health] Health publication context is invalid.\n");
+        return;
+    }
+    g_SetDialogVariableInt = reinterpret_cast<SetDialogVariableInt_t>(healthSetter);
 
     // IDA / Hex-Rays confirms that all four calls obtain the native local
     // player controller for TeamCounter visibility or row-state decisions:

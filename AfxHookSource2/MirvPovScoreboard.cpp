@@ -279,10 +279,10 @@ void MirvPovScoreboard_Initialize(HMODULE clientDll)
     HookUserCommands(clientDll);
 }
 
-void MirvPovScoreboard_Reset()
+void MirvPovScoreboard_Reset(bool resetSettings)
 {
     SetScoreboardOpen(false);
-    g_ScoreboardSyncEnabled = false;
+    if(resetSettings) g_ScoreboardSyncEnabled = false;
     g_HltvScoreboardOpen = false;
     memset(g_UserCmdScoreboardOpen, 0, sizeof(g_UserCmdScoreboardOpen));
 }

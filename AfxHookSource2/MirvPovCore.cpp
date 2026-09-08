@@ -314,12 +314,10 @@ void MirvPov_UpdateSeekDetection()
     if(!g_pEngineToClient) return;
     SOURCESDK::CS2::IDemoFile * demoFile = g_pEngineToClient->GetDemoFile();
     if(!demoFile) {
-        // A disconnect can leave mirv_pov enabled while the next demo has not
-        // created its Panorama tree yet. Keep the HUD state pending so the
-        // first render pass of the next demo reapplies it.
+        // Also discard demo-owned state on disconnect, even if the engine
+        // has not started the next LevelInitPreEntity yet.
         if(g_MirvPovHadDemoFile) {
-            MirvPovHud_OnLevelInitPreEntity();
-            g_MirvPovHadDemoFile = false;
+            MirvPov_OnLevelInitPreEntity();
         }
         return;
     }
@@ -382,6 +380,19 @@ void MirvPov_OnPanoramaLayoutFileLoaded(const char * filePath)
 void MirvPov_OnLevelInitPreEntity()
 {
     g_MirvPovHadDemoFile = false;
+    // Do not disable/re-enable: hooks and user settings survive demo changes,
+    // but entity handles, message queues and native object caches must not.
+    MirvPovSoundCircle_ResetDemoState();
+    MirvPovVoiceBan_ResetDemoState();
+    MirvPovScoreboard_Reset(false);
+    MirvPovVoice_ResetDemoState();
+    MirvPovDeathCam_Reset();
+    MirvPovFeedback_ResetPovSelection();
+    MirvPovDeathPanel_Clear();
+    RenderSystemDX11_DeathFade_Reset();
+    RenderSystemDX11_DeathFade_ResetObserverState();
+    MirvPovKillReward_Reset("demo changed");
+    MirvPovRadio_ResetDemoState();
     if(MIRV_POV_FEATURE_ENABLED("hud")) MirvPovHud_OnLevelInitPreEntity();
 }
 
@@ -409,11 +420,14 @@ void MirvPov_Enable(HMODULE clientDll)
     if(MIRV_POV_FEATURE_ENABLED("killreward")) MirvPovKillReward_Initialize(clientDll);
     if(MIRV_POV_FEATURE_ENABLED("radio")) MirvPovRadio_Initialize(clientDll);
     if(MIRV_POV_FEATURE_ENABLED("voice") && MirvPovVoice_IsEnabled()) MirvPov_UpdateVoiceTeam();
+    if(MIRV_POV_FEATURE_ENABLED("hud")) MirvPovHud_ReapplyPanelState();
 }
 
 void MirvPov_Disable()
 {
     if(!g_MirvPovEnabled) return;
+    // Native callbacks reached during restoration must already see pass-through.
+    g_MirvPovEnabled = false;
 
     MirvPovScoreboard_Reset();
     MirvPovDeathPanel_Clear();
@@ -431,5 +445,4 @@ void MirvPov_Disable()
     MirvPovKillReward_Reset("mirv_pov disabled");
     MirvPovRadio_Reset("mirv_pov disabled");
     g_MirvPovHadDemoFile = false;
-    g_MirvPovEnabled = false;
 }

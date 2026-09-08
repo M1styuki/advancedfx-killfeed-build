@@ -1483,6 +1483,7 @@ void MirvPovKillReward_OnDemoTick(int demoTick)
 void MirvPovKillReward_Reset(const char * reason)
 {
     ClearPending(reason);
+    g_LastDemoTick = -1;
     g_CurrentKillReward = -1;
     g_LastControllerHandle = -1;
     g_LastMoneyControllerHandle = -1;

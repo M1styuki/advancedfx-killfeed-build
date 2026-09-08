@@ -11,6 +11,7 @@ void MirvPovRadio_HandleSoundEvent(CEntityInstance * sourcePawn, const char * so
 void MirvPovRadio_HandleEntityAdded(CEntityInstance * entity, int handle);
 void MirvPovRadio_OnDemoTick(int demoTick);
 void MirvPovRadio_Reset(const char * reason);
+void MirvPovRadio_ResetDemoState();
 bool MirvPovRadio_IsAvailable();
 int MirvPovRadio_GetMode();
 const char * MirvPovRadio_GetModeDescription(int mode);

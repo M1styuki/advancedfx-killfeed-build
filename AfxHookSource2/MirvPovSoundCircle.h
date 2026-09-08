@@ -8,6 +8,7 @@
 #include <Windows.h>
 
 void MirvPovSoundCircle_Initialize(HMODULE clientDll);
+void MirvPovSoundCircle_ResetDemoState();
 bool MirvPovSoundCircle_IsHooked();
 bool MirvPovSoundCircle_IsDirectEmitterReady();
 

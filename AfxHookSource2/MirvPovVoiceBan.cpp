@@ -198,6 +198,12 @@ void MirvPovVoiceBan_OnRenderPass()
     Update();
 }
 
+void MirvPovVoiceBan_ResetDemoState()
+{
+    // The next demo may restore a block for a player already seen here.
+    g_ClearedSteamIds.clear();
+}
+
 CON_COMMAND(mirv_voicebanFix, "Ignore communication-abuse mute flags without modifying voice messages.")
 {
     int argc = args->ArgC();
