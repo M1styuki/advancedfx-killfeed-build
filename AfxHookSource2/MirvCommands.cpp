@@ -1,4 +1,5 @@
 #include "MirvCommands.h"
+#include "AfxBuildInfo.h"
 #include "ClientEntitySystem.h"
 #include "MirvPovCore.h"
 #include "MirvPovKillReward.h"
@@ -23,6 +24,12 @@
 #include <filesystem>
 
 #include <algorithm>
+
+static void PrintMirvPovEnabledBuild()
+{
+    advancedfx::Message("mirv_pov enabled. Git: %s | Built: %s\n",
+        AFX_BUILD_GIT, AFX_BUILD_UTC);
+}
 
 bool g_bHookedMirvCommands = false;
 
@@ -287,7 +294,7 @@ CON_COMMAND(mirv_pov, "POV HUD with radar, feedback, and native pickup prompts. 
 				MirvPovTeamID_ApplyPatches(hClient);
 				#endif
 						MirvPov_Enable(hClient);
-					advancedfx::Message("mirv_pov enabled. Use mp_forcecamera 0 for cross-team switching.\n");
+					PrintMirvPovEnabledBuild();
 					#if AFX_MIRV_POV_DIAGNOSTICS
 					advancedfx::Message(
 					"Current fix: killreward (HudChat: %s); radio / grenade-radio (HudChat: %s).\n"
@@ -311,7 +318,7 @@ CON_COMMAND(mirv_pov, "POV HUD with radar, feedback, and native pickup prompts. 
 			"  true  - Enable POV HUD, native pickup prompts, teammate competitive radar colors, smoke-visible teammates, red enemies\n"
 			"  false - Disable and restore original behavior\n"
 			"Current: %s\n"
-			"Note: Use mirv_pov_scoreboard 1 to enable demo scoreboard sync. Use mp_forcecamera 0 for cross-team switching. Offline demo only. Restores POV cvars on disable.\n"
+			"Note: Use mirv_pov_scoreboard 1 to enable demo scoreboard sync. Offline demo only. Restores POV cvars on disable.\n"
 			, MirvPov_IsEnabled() ? "enabled" : "disabled"
 		);
 }

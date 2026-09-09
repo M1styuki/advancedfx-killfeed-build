@@ -49,6 +49,20 @@ add_custom_target(AfxHookSource2Shaders
 
 add_library(${PROJECT_NAME} MODULE)
 
+# Run at build time, not configure time: incremental and CI builds must report
+# the checkout and UTC time actually used to produce this DLL.
+set(AFX_BUILD_INFO_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated/$<CONFIG>")
+add_custom_target(AfxHookSource2BuildInfo
+    COMMAND "${CMAKE_COMMAND}"
+        "-DSOURCE_DIR=${CMAKE_SOURCE_DIR}"
+        "-DOUTPUT_FILE=${AFX_BUILD_INFO_DIR}/AfxBuildInfo.h"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/GenerateBuildInfo.cmake"
+    BYPRODUCTS "${AFX_BUILD_INFO_DIR}/AfxBuildInfo.h"
+    VERBATIM
+)
+add_dependencies(${PROJECT_NAME} AfxHookSource2BuildInfo)
+target_include_directories(${PROJECT_NAME} PRIVATE "${AFX_BUILD_INFO_DIR}")
+
 add_dependencies(${PROJECT_NAME}
     OpenEXR
     AfxHookSource2Shaders

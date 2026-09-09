@@ -19,7 +19,7 @@
 
 namespace {
 
-using GetLocalPlayerController_t = CEntityInstance * (__fastcall *)();
+using GetLocalPlayerPawn_t = CEntityInstance * (__fastcall *)();
 using GetPlayerControllerFromSlot_t = CEntityInstance * (__fastcall *)(int);
 using BuildPlayerData_t = void (__fastcall *)(void *, void *, const void *, int);
 using PresentPlayerData_t = void (__fastcall *)(void *, const void *, void *);
@@ -33,7 +33,7 @@ enum class TargetRelation {
     Enemy
 };
 
-GetLocalPlayerController_t g_OrgGetLocalPlayerController = nullptr;
+GetLocalPlayerPawn_t g_OrgGetLocalPlayerPawn = nullptr;
 GetPlayerControllerFromSlot_t g_GetPlayerControllerFromSlot = nullptr;
 BuildPlayerData_t g_OrgBuildPlayerData = nullptr;
 PresentPlayerData_t g_OrgPresentPlayerData = nullptr;
@@ -251,30 +251,33 @@ int GetTeamCounterContextIndex(void * address)
     return -1;
 }
 
-CEntityInstance * __fastcall New_GetLocalPlayerController()
+CEntityInstance * __fastcall New_GetLocalPlayerPawn()
 {
     void * previousReturnAddress = MirvPov_PushHookReturnAddress(_ReturnAddress());
     void * returnAddress = MirvPov_GetHookReturnAddress();
-    CEntityInstance * nativeController = g_OrgGetLocalPlayerController();
+    CEntityInstance * nativePawn = g_OrgGetLocalPlayerPawn();
     MirvPov_PopHookReturnAddress(previousReturnAddress);
     if(!MIRV_POV_FEATURE_ACTIVE("teamhealth")
-        || TargetRelation::Unknown == g_TargetRelation) return nativeController;
+        || TargetRelation::Unknown == g_TargetRelation) return nativePawn;
 
     int contextIndex = GetTeamCounterContextIndex(returnAddress);
-    if(contextIndex < 0) return nativeController;
+    if(contextIndex < 0) return nativePawn;
 
     __try {
-        CEntityInstance * povController = GetCurrentPovPlayerController();
-        if(nullptr == povController || !povController->IsPlayerController())
-            return nativeController;
+        // The native getter returns a Pawn, not its Controller. Its callers
+        // dispatch Pawn virtual methods; a Controller has incompatible slots
+        // and can turn those calls into writes through unrelated registers.
+        CEntityInstance * povPawn = GetCurrentPovPlayerPawn();
+        if(nullptr == povPawn || !povPawn->IsPlayerPawn())
+            return nativePawn;
 
-        int team = povController->GetTeam();
+        int team = povPawn->GetTeam();
         if(2 != team && 3 != team)
-            return nativeController;
+            return nativePawn;
 
-        return povController;
+        return povPawn;
     } __except(EXCEPTION_EXECUTE_HANDLER) {
-        return nativeController;
+        return nativePawn;
     }
 }
 
@@ -352,10 +355,10 @@ void MirvPovTeamHealth_Initialize(HMODULE clientDll)
     }
     g_SetDialogVariableInt = reinterpret_cast<SetDialogVariableInt_t>(healthSetter);
 
-    // IDA / Hex-Rays confirms that all four calls obtain the native local
-    // player controller for TeamCounter visibility or row-state decisions:
+    // All four calls obtain the native local player Pawn for TeamCounter
+    // visibility or row-state decisions:
     // one while building cached player data and three while presenting it.
-    // They must all observe the same POV controller. Mixing native and POV
+    // They must all observe the same POV Pawn. Mixing native and POV
     // contexts leaves health/equipment fields stale across team switches and seeks.
     uint8_t * callSites[] = {
         builder + 0x55,
@@ -429,7 +432,7 @@ void MirvPovTeamHealth_Initialize(HMODULE clientDll)
         g_ObserverGateReturnAddresses[i] = observerGateCallSites[i] + 5;
     }
 
-    g_OrgGetLocalPlayerController = reinterpret_cast<GetLocalPlayerController_t>(getterTarget);
+    g_OrgGetLocalPlayerPawn = reinterpret_cast<GetLocalPlayerPawn_t>(getterTarget);
     g_GetPlayerControllerFromSlot = reinterpret_cast<GetPlayerControllerFromSlot_t>(slotResolverTarget);
     g_OrgBuildPlayerData = reinterpret_cast<BuildPlayerData_t>(builder);
     g_OrgPresentPlayerData = reinterpret_cast<PresentPlayerData_t>(presentation);
@@ -439,14 +442,14 @@ void MirvPovTeamHealth_Initialize(HMODULE clientDll)
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
     DetourAttach(
-        &(PVOID &)g_OrgGetLocalPlayerController,
-        New_GetLocalPlayerController);
+        &(PVOID &)g_OrgGetLocalPlayerPawn,
+        New_GetLocalPlayerPawn);
     DetourAttach(&(PVOID &)g_OrgBuildPlayerData, New_BuildPlayerData);
     DetourAttach(&(PVOID &)g_OrgPresentPlayerData, New_PresentPlayerData);
     DetourAttach(&(PVOID &)g_OrgBuilderVisibilityFlag, New_BuilderVisibilityFlag);
     DetourAttach(&(PVOID &)g_OrgObserverVisibilityGate, New_ObserverVisibilityGate);
     if(NO_ERROR != DetourTransactionCommit()) {
-        g_OrgGetLocalPlayerController = nullptr;
+        g_OrgGetLocalPlayerPawn = nullptr;
         g_GetPlayerControllerFromSlot = nullptr;
         g_OrgBuildPlayerData = nullptr;
         g_OrgPresentPlayerData = nullptr;
