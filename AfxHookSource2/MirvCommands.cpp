@@ -2,6 +2,7 @@
 #include "AfxBuildInfo.h"
 #include "ClientEntitySystem.h"
 #include "MirvPovCore.h"
+#include "MirvPovBuyMenu.h"
 #include "MirvPovKillReward.h"
 #include "MirvPovRadar.h"
 #include "MirvPovRadio.h"
@@ -276,6 +277,30 @@ CON_COMMAND(mirv_pov_debug_feature, "Configure a mirv_pov feature for the next e
 }
 #endif
 
+CON_COMMAND(mirv_pov_buymenu, "Sync the observed player's native buy menu during demo playback. Disabled by default; requires mirv_pov.")
+{
+    if(args->ArgC() == 2) {
+        const char * value = args->ArgV(1);
+        if(!_stricmp(value, "1") || !_stricmp(value, "true") || !_stricmp(value, "on")) {
+            MirvPovBuyMenu_SetEnabled(true);
+            advancedfx::Message("mirv_pov_buymenu enabled. Requires mirv_pov 1 during demo playback.\n");
+            return;
+        }
+        if(!_stricmp(value, "0") || !_stricmp(value, "false") || !_stricmp(value, "off")) {
+            MirvPovBuyMenu_SetEnabled(false);
+            advancedfx::Message("mirv_pov_buymenu disabled.\n");
+            return;
+        }
+    }
+    advancedfx::Message("Usage: mirv_pov_buymenu <0|1>\nCurrent: %s\nDefault: disabled. Requires mirv_pov 1 during demo playback.\n",
+        MirvPovBuyMenu_IsEnabled() ? "enabled" : "disabled");
+}
+
+CON_COMMAND(mirv_pov_buymenu_status, "Inspect native POV buy menu simulation and recorded player state.")
+{
+    MirvPovBuyMenu_PrintStatus();
+}
+
 CON_COMMAND(mirv_pov, "POV HUD with radar, feedback, and native pickup prompts. Offline demo playback only.")
 {
 	int argc = args->ArgC();
@@ -319,6 +344,7 @@ CON_COMMAND(mirv_pov, "POV HUD with radar, feedback, and native pickup prompts. 
 			"  false - Disable and restore original behavior\n"
 			"Current: %s\n"
 			"Note: Use mirv_pov_scoreboard 1 to enable demo scoreboard sync. Offline demo only. Restores POV cvars on disable.\n"
+			"Use mirv_pov_buymenu 1 to enable native buy menu simulation (disabled by default).\n"
 			, MirvPov_IsEnabled() ? "enabled" : "disabled"
 		);
 }

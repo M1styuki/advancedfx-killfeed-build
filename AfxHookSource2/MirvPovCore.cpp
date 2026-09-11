@@ -1,6 +1,7 @@
 #include "stdafx.h"
 
 #include "MirvPovCore.h"
+#include "MirvPovBuyMenu.h"
 
 #include "ClientEntitySystem.h"
 #include "Globals.h"
@@ -55,6 +56,7 @@ MirvPovDebugFeatureState g_MirvPovDebugFeatures[] = {
     {"soundcircle", true, true},
     {"hud", true, true},
     {"teamhealth", true, true},
+    {"buymenu", true, true},
     {"radar", true, true},
     {"voice", true, true},
     {"scoreboard", true, true},
@@ -357,6 +359,7 @@ void MirvPov_OnFrameStageAfter(int frameStage)
             RenderSystemDX11_DeathFade_UpdateObserverState();
         }
         MirvPov_UpdateSeekDetection();
+        MirvPovBuyMenu_Update();
         if(MIRV_POV_FEATURE_ENABLED("voice")) MirvPovVoice_AfterRenderPass();
     }
 }
@@ -379,6 +382,7 @@ void MirvPov_OnPanoramaLayoutFileLoaded(const char * filePath)
 
 void MirvPov_OnLevelInitPreEntity()
 {
+    MirvPovBuyMenu_Reset();
     g_MirvPovHadDemoFile = false;
     // Do not disable/re-enable: hooks and user settings survive demo changes,
     // but entity handles, message queues and native object caches must not.
@@ -414,6 +418,7 @@ void MirvPov_Enable(HMODULE clientDll)
     MirvPov_ResetVoiceHud();
 
     g_MirvPovEnabled = true;
+    if(MIRV_POV_FEATURE_ENABLED("buymenu")) MirvPovBuyMenu_Initialize(clientDll);
     if(MIRV_POV_FEATURE_ENABLED("feedback")) MirvPovFeedback_Initialize(clientDll);
     if(MIRV_POV_FEATURE_ENABLED("deathcam")) MirvPovDeathCam_Initialize(clientDll);
     if(MIRV_POV_FEATURE_ENABLED("pickupprompt")) MirvPovPickupPrompt_Initialize(clientDll);
@@ -426,6 +431,7 @@ void MirvPov_Enable(HMODULE clientDll)
 void MirvPov_Disable()
 {
     if(!g_MirvPovEnabled) return;
+    MirvPovBuyMenu_Reset();
     // Native callbacks reached during restoration must already see pass-through.
     g_MirvPovEnabled = false;
 

@@ -150,6 +150,8 @@ void initSchemaSystemOffsets()
 			if (!getOffset(&g_clientDllOffsets.C_CSPlayerPawn.m_bPrevHelmet, "client.dll", "C_CSPlayerPawn", "m_bPrevHelmet")) {
 				advancedfx::Warning("SchemaSystem optional offset lookup failed: C_CSPlayerPawn.m_bPrevHelmet\n");
 			}
+			getOffset(&g_clientDllOffsets.C_CSPlayerPawn.m_bIsBuyMenuOpen,
+				"client.dll", "C_CSPlayerPawn", "m_bIsBuyMenuOpen");
 			getOffset(&g_clientDllOffsets.C_CSPlayerPawn.m_bInBuyZone,
 				"client.dll", "C_CSPlayerPawn", "m_bInBuyZone")
 				|| getOffset(&g_clientDllOffsets.C_CSPlayerPawn.m_bInBuyZone,
