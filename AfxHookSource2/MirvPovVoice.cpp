@@ -57,6 +57,7 @@ struct MirvPovVoiceMaskCvar {
     SOURCESDK::CS2::ConVarHandle handle;
     int previousValue = 0;
     bool previousValueSaved = false;
+    int lastAppliedValue = 0;
 };
 
 static MirvPovVoiceMaskCvar g_MirvPovVoiceMaskLow = { "tv_listen_voice_indices" };
@@ -76,6 +77,7 @@ static void MirvPov_SetVoiceMaskCvar(MirvPovVoiceMaskCvar & state, int value) {
         state.previousValue = cvar->m_Value.m_i32Value;
         state.previousValueSaved = true;
     }
+    state.lastAppliedValue = value;
     if(cvar->m_Value.m_i32Value == value) return;
 
     SOURCESDK::CS2::CVValue_t oldValue = {};
@@ -101,6 +103,22 @@ static void MirvPov_RestoreVoiceMaskCvar(MirvPovVoiceMaskCvar & state) {
         SOURCESDK::CS2::g_pCVar->CallChangeCallback(state.handle, 0, &newValue, &oldValue);
     }
     state.previousValueSaved = false;
+}
+
+static void MirvPov_CheckManualVoiceMute() {
+    if(!g_MirvPovVoiceEnabled || !g_MirvPovVoiceMaskLow.previousValueSaved
+        || g_MirvPovVoiceMaskLow.lastAppliedValue == 0) return;
+    SOURCESDK::CS2::Cvar_s * low = MirvPov_GetVoiceMaskCvar(g_MirvPovVoiceMaskLow);
+    if(!low || low->m_Value.m_i32Value != 0) return;
+
+    // A user mute disables the feature too. Clear the high slots and relinquish
+    // both masks before resetting, so restoration cannot undo the mute.
+    g_MirvPovVoiceEnabled = false;
+    MirvPov_SetVoiceMaskCvar(g_MirvPovVoiceMaskHigh, 0);
+    g_MirvPovVoiceMaskLow.previousValueSaved = false;
+    g_MirvPovVoiceMaskHigh.previousValueSaved = false;
+    if(g_pEngineToClient) g_pEngineToClient->ExecuteClientCmd(0, "servervoice_clear", true);
+    MirvPov_ResetVoiceHud();
 }
 
 static bool MirvPov_IsVoiceHudReady() {
@@ -162,6 +180,8 @@ static bool MirvPov_IsVoicePlayerSlotOnWatchedTeam(unsigned int playerSlot) {
 
 void MirvPov_UpdateVoiceTeam() {
     if(!g_MirvPovVoiceEnabled || !MIRV_POV_FEATURE_ACTIVE("voice")) return;
+    MirvPov_CheckManualVoiceMute();
+    if(!g_MirvPovVoiceEnabled) return;
 
     CEntityInstance * watchedController = GetCurrentPovPlayerController();
     if(nullptr == watchedController || !watchedController->IsPlayerController()) return;
@@ -291,6 +311,7 @@ static void MirvPov_UpdateVoiceRuntime() {
 void MirvPov_UpdateVoiceHud() {
     if(!g_MirvPovVoiceEnabled || !MIRV_POV_FEATURE_ACTIVE("voice")) return;
     MirvPov_UpdateVoiceTeam();
+    if(!g_MirvPovVoiceEnabled) return;
     MirvPov_UpdateVoiceRuntime();
 }
 
@@ -298,6 +319,7 @@ void MirvPovVoice_OnRenderPass()
 {
     if(g_MirvPovVoiceEnabled && MIRV_POV_FEATURE_ACTIVE("voice")) {
         MirvPov_UpdateVoiceTeam();
+        if(!g_MirvPovVoiceEnabled) return;
         MirvPov_UpdateVoiceRuntime();
     }
 }
@@ -312,6 +334,7 @@ void MirvPovVoice_AfterRenderPass()
 void MirvPov_ResetVoiceHud() {
     g_MirvPovVoiceLastDemoTick = INT_MIN;
     g_MirvPovVoiceHadDemoFile = false;
+    MirvPov_CheckManualVoiceMute();
     MirvPov_RestoreVoiceMaskCvar(g_MirvPovVoiceMaskLow);
     MirvPov_RestoreVoiceMaskCvar(g_MirvPovVoiceMaskHigh);
     MirvPov_RequestFullVoiceClear();
@@ -335,6 +358,7 @@ void MirvPovVoice_ResetDemoState()
 
 void MirvPovVoice_SetEnabled(bool enabled)
 {
+    MirvPov_CheckManualVoiceMute();
     if(g_MirvPovVoiceEnabled == enabled) return;
 
     g_MirvPovVoiceEnabled = enabled;

@@ -417,8 +417,9 @@ CON_COMMAND(mirv_pov_voice, "Enable POV team voice routing and voice HUD synchro
 	}
 	advancedfx::Message(
 		"Usage: mirv_pov_voice true|false\n"
-		"  true  - Route voice to the current POV team and synchronize the voice HUD\n"
+		"  true  - Resume automatic POV team voice routing and synchronize the voice HUD\n"
 		"  false - Restore the original voice masks and disable synthetic speaking\n"
+		"  Setting tv_listen_voice_indices to 0 while routing disables mirv_pov_voice and clears both voice masks.\n"
 		"Current: %s\n"
 			, MirvPovVoice_IsEnabled() ? "enabled" : "disabled"
 	);
