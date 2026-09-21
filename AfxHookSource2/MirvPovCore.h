@@ -13,17 +13,14 @@ class IGameEvent;
 
 bool MirvPov_IsEnabled();
 
-#if AFX_MIRV_POV_DIAGNOSTICS
 bool MirvPovDebug_CanConfigure();
 bool MirvPovDebug_HasFeature(const char * name);
+bool MirvPovDebug_IsFeatureImmediate(const char * name);
 bool MirvPovDebug_IsFeatureEnabled(const char * name);
 bool MirvPovDebug_SetFeatureEnabled(const char * name, bool enabled);
 void MirvPovDebug_ApplyFeatureConfiguration();
 void MirvPovDebug_PrintFeatureStates();
 #define MIRV_POV_FEATURE_ACTIVE(name) (MirvPov_IsEnabled() && MirvPovDebug_IsFeatureEnabled(name))
-#else
-#define MIRV_POV_FEATURE_ACTIVE(name) MirvPov_IsEnabled()
-#endif
 bool MirvPov_IsDeathFeedbackEnabled();
 void MirvPov_SetDeathFeedbackEnabled(bool enabled);
 void MirvPov_Enable(HMODULE clientDll);

@@ -146,15 +146,31 @@ static bool MirvPovHud_PanelContainsId(unsigned char* parentPanel, const char* p
 static void MirvPovHud_SetPanelsWithClassVisible(
     unsigned char* panel,
     short classSymbol,
-    bool visible) {
+    bool visible,
+    bool followRoundState) {
     if(!panel) return;
+
+    // Native hudteamcounter.css uses an ancestor selector. TeamCounter owns
+    // ROUNDDOWNTIME; it is not a class on the outer HUD panel. FREEZETIME
+    // also covers the initial round before any round_end has been dispatched.
+    if(followRoundState && !visible)
+        visible = Panorama_HasPanelClass(panel, "ROUNDDOWNTIME")
+            || Panorama_HasPanelClass(panel, "FREEZETIME");
 
     auto vtable = *(void***)panel;
     if(vtable) {
         using HasPanelClass_t = bool (__fastcall *)(void*, short);
         auto hasPanelClass = reinterpret_cast<HasPanelClass_t>(vtable[157]);
         if(hasPanelClass && hasPanelClass(panel, classSymbol)) {
-            MirvPovHud_SetPanelVisible(panel, visible);
+            const bool applied = MirvPovHud_SetPanelVisible(panel, visible);
+#if AFX_MIRV_POV_DIAGNOSTICS
+            static int lastState = -1;
+            const int state = visible ? 1 : 0;
+            if(followRoundState && (lastState != state || !applied)) {
+                advancedfx::Message("[mirv_pov_hud] player names visible=%d applied=%d\n", state, applied ? 1 : 0);
+                lastState = state;
+            }
+#endif
         }
     }
 
@@ -164,29 +180,26 @@ static void MirvPovHud_SetPanelsWithClassVisible(
         MirvPovHud_SetPanelsWithClassVisible(
             ((unsigned char***)children)[1][i],
             classSymbol,
-            visible);
+            visible,
+            followRoundState);
     }
 }
 
-static void MirvPovHud_SetTeamCounterPlayerNamesVisible(bool visible) {
+static void MirvPovHud_SetTeamCounterPlayerNamesVisible(bool visible, bool followRoundState = false) {
     __try {
         auto hudPanel = MirvPovHud_GetHudPanel();
         if(!hudPanel) return;
 
         short nameClass = -1;
         if(!MirvPovHud_MakeSymbol("AvatarL__name", nameClass)) return;
-        MirvPovHud_SetPanelsWithClassVisible(hudPanel, nameClass, visible);
+        MirvPovHud_SetPanelsWithClassVisible(hudPanel, nameClass, visible, followRoundState);
     } __except(EXCEPTION_EXECUTE_HANDLER) {}
 }
 
 static void MirvPovHud_RefreshTeamCounterPlayerNames() {
-    auto hudPanel = MirvPovHud_GetHudPanel();
-    if(!hudPanel) return;
-
     // Native alive POV CSS shows names only while ROUNDDOWNTIME is set. The
     // real spectator root otherwise keeps them visible throughout the round.
-    MirvPovHud_SetTeamCounterPlayerNamesVisible(
-        Panorama_HasPanelClass(hudPanel, "ROUNDDOWNTIME"));
+    MirvPovHud_SetTeamCounterPlayerNamesVisible(false, true);
 }
 
 static bool MirvPovHud_SetStrokeSiblingVisibleForAnchor(unsigned char* parentPanel, const char* anchorId, bool visible) {
@@ -475,6 +488,58 @@ static uint8_t * MirvPovHud_GetRelativeCallTarget(uint8_t * callSite) {
     return callSite + 5 + relative;
 }
 
+using HudObserverMode_t = int (__fastcall *)();
+static HudObserverMode_t g_OrgHudObserverMode = nullptr;
+static void * g_HealthAmmoObserverModeReturns[2] = {};
+static bool g_HudObserverModeHooked = false;
+
+static int __fastcall New_HudObserverMode() {
+    void * previous = MirvPov_PushHookReturnAddress(_ReturnAddress());
+    void * caller = MirvPov_GetHookReturnAddress();
+    int mode = g_OrgHudObserverMode();
+    MirvPov_PopHookReturnAddress(previous);
+    if(MIRV_POV_FEATURE_ACTIVE("hud")
+        && (caller == g_HealthAmmoObserverModeReturns[0]
+            || caller == g_HealthAmmoObserverModeReturns[1])) {
+#if AFX_MIRV_POV_DIAGNOSTICS
+        static bool reported = false;
+        if(!reported && (mode == 2 || mode == 3)) {
+            advancedfx::Message("[mirv_pov_hud] HealthAmmoCenter observer mode %d -> 0\n", mode);
+            reported = true;
+        }
+#endif
+        return 0;
+    }
+    return mode;
+}
+
+static void MirvPovHud_InstallObserverModeHook(HMODULE clientDll) {
+    if(g_HudObserverModeHooked) return;
+
+    // HealthAmmoCenter selects ui_hud_kill_streaks_spectator_* for modes 2/3.
+    // Only this presentation decision needs live POV semantics; keep the
+    // native kill queue, effect playback and all other observer queries intact.
+    auto match = reinterpret_cast<uint8_t *>(getAddress(clientDll,
+        "E8 ?? ?? ?? ?? 83 F8 02 74 0A E8 ?? ?? ?? ?? 83 F8 03 75 09 48 85 DB 74 04 B2 01"));
+    auto target = MirvPovHud_GetRelativeCallTarget(match);
+    if(!target || target != MirvPovHud_GetRelativeCallTarget(match + 10)) {
+        MIRV_POV_DIAGNOSTIC_WARNING("[mirv_pov_hud] HealthAmmoCenter observer-mode calls were not found.\n");
+        return;
+    }
+    g_OrgHudObserverMode = reinterpret_cast<HudObserverMode_t>(target);
+    g_HealthAmmoObserverModeReturns[0] = match + 5;
+    g_HealthAmmoObserverModeReturns[1] = match + 15;
+    if(NO_ERROR != DetourTransactionBegin()) return;
+    if(NO_ERROR != DetourUpdateThread(GetCurrentThread())
+        || NO_ERROR != DetourAttach(&(PVOID &)g_OrgHudObserverMode, New_HudObserverMode)) {
+        DetourTransactionAbort();
+        return;
+    }
+    g_HudObserverModeHooked = NO_ERROR == DetourTransactionCommit();
+    if(!g_HudObserverModeHooked)
+        MIRV_POV_DIAGNOSTIC_WARNING("[mirv_pov_hud] HealthAmmoCenter observer-mode detour failed.\n");
+}
+
 static bool __fastcall New_FlashViewPredicate() {
     void * previousReturnAddress = MirvPov_PushHookReturnAddress(_ReturnAddress());
     void * returnAddress = MirvPov_GetHookReturnAddress();
@@ -538,6 +603,7 @@ void MirvPovHud_ApplyPatches(HMODULE clientDll) {
     }
 
     MirvPovHud_InstallFlashPredicateHook(clientDll);
+    MirvPovHud_InstallObserverModeHook(clientDll);
     g_FlashHooksActive = true;
 
     MirvPovHud_ResetPanelState();

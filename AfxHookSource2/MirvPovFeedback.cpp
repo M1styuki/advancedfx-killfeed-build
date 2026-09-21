@@ -81,6 +81,14 @@ const FlashSoundProfile kLongFlashSoundProfile = {
     "Flashbang.Ring.Long", 0xf339fbbb
 };
 
+struct FlashDetonation {
+    int entityIndex = -1;
+    int frame = INT_MIN;
+    uint32_t povHandle = 0xFFFFFFFFu;
+    float distance = 0.0f;
+};
+FlashDetonation g_LastFlashDetonation;
+
 bool ClaimDamageDirection(
     int victimEntityIndex,
     int amount,
@@ -210,12 +218,15 @@ bool PlayLocalFlashRing(const char * soundName)
     }
 }
 
-const FlashSoundProfile * GetFlashSoundProfile(float blindDuration)
+const FlashSoundProfile * GetFlashSoundProfile(float distance)
 {
-    if(!std::isfinite(blindDuration) || blindDuration <= 0.0f) return nullptr;
-    if(2.5f <= blindDuration) return &kLongFlashSoundProfile;
-    if(0.75f <= blindDuration) return &kMediumFlashSoundProfile;
-    return &kShortFlashSoundProfile;
+    // Native server.dll selects DSP/ring by blast-to-eye distance, independently
+    // of the view-angle-dependent blind duration (100 / 500 / 1000 units).
+    if(!std::isfinite(distance) || distance < 0.0f) return nullptr;
+    if(distance < 100.0f) return &kLongFlashSoundProfile;
+    if(distance < 500.0f) return &kMediumFlashSoundProfile;
+    if(distance < 1000.0f) return &kShortFlashSoundProfile;
+    return nullptr;
 }
 
 void Play(CEntityInstance * victimPawn, const char * soundName)
@@ -335,14 +346,44 @@ void HandleHurt(SOURCESDK::CS2::IGameEvent * event)
                 : "Player.DamageBody.AttackerFeedback"));
 }
 
+void HandleFlashDetonate(SOURCESDK::CS2::IGameEvent * event)
+{
+    g_LastFlashDetonation = FlashDetonation();
+    if(!MirvPovDebug_IsFeatureEnabled("deafen")) return;
+    CEntityInstance * pawn = GetCurrentPovPlayerPawn();
+    if(!IsRemotePovPawn(pawn)) return;
+    const auto entityKey = MakeKey("entityid");
+    const auto xKey = MakeKey("x");
+    const auto yKey = MakeKey("y");
+    const auto zKey = MakeKey("z");
+    if(!event->HasKey(entityKey) || !event->HasKey(xKey)
+        || !event->HasKey(yKey) || !event->HasKey(zKey)) return;
+
+    float eye[3] = {};
+    pawn->GetRenderEyeOrigin(eye);
+    const float dx = event->GetFloat(xKey) - eye[0];
+    const float dy = event->GetFloat(yKey) - eye[1];
+    // RadiusFlash raises the detonation origin by one unit before computing
+    // visibility and eye distance. flashbang_detonate contains the original Z.
+    const float dz = event->GetFloat(zKey) + 1.0f - eye[2];
+    g_LastFlashDetonation.distance = std::sqrt(dx * dx + dy * dy + dz * dz);
+    g_LastFlashDetonation.entityIndex = event->GetInt(entityKey);
+    g_LastFlashDetonation.frame = g_MirvTime.framecount_get();
+    g_LastFlashDetonation.povHandle = pawn->GetHandle().ToInt();
+}
+
 void HandlePlayerBlind(CEntityInstance * victimPawn, SOURCESDK::CS2::IGameEvent * event)
 {
+    if(!MirvPovDebug_IsFeatureEnabled("deafen")) return;
     if(!IsRemotePovPawn(victimPawn) || nullptr == event) return;
-
-    auto durationKey = MakeKey("blind_duration");
-    if(!event->HasKey(durationKey)) return;
-    const float blindDuration = event->GetFloat(durationKey);
-    const FlashSoundProfile * profile = GetFlashSoundProfile(blindDuration);
+    const auto entityKey = MakeKey("entityid");
+    if(!event->HasKey(entityKey)
+        || event->GetInt(entityKey) != g_LastFlashDetonation.entityIndex
+        || victimPawn->GetHandle().ToInt() != g_LastFlashDetonation.povHandle
+        || g_LastFlashDetonation.frame != g_MirvTime.framecount_get()) return;
+    const float distance = g_LastFlashDetonation.distance;
+    g_LastFlashDetonation = FlashDetonation();
+    const FlashSoundProfile * profile = GetFlashSoundProfile(distance);
     if(nullptr == profile) return;
 
     // Additive fallback only: never suppress the native ring or AudioParameter
@@ -351,8 +392,8 @@ void HandlePlayerBlind(CEntityInstance * victimPawn, SOURCESDK::CS2::IGameEvent 
     const bool deafenApplied = ApplyDeafenControl(profile->deafenControlHash);
     const bool ringPlayed = PlayLocalFlashRing(profile->ringSound);
     MIRV_POV_DIAGNOSTIC_MESSAGE(
-        "[mirv_pov_feedback] remote POV flash duration=%.3f deafen=%d ring=%d sound=%s\n",
-        blindDuration,
+        "[mirv_pov_feedback] remote POV flash distance=%.3f deafen=%d ring=%d sound=%s\n",
+        distance,
         deafenApplied ? 1 : 0,
         ringPlayed ? 1 : 0,
         profile->ringSound);
@@ -360,7 +401,8 @@ void HandlePlayerBlind(CEntityInstance * victimPawn, SOURCESDK::CS2::IGameEvent 
 
 void HandleHeGrenadeHurt(CEntityInstance * victimPawn, SOURCESDK::CS2::IGameEvent * event)
 {
-    if(!IsRemotePovPawn(victimPawn) || nullptr == event) return;
+    if(!MirvPovDebug_IsFeatureEnabled("deafen")) return;
+    if(nullptr == event) return;
 
     auto weaponKey = MakeKey("weapon");
     if(!event->HasKey(weaponKey)) return;
@@ -369,12 +411,42 @@ void HandleHeGrenadeHurt(CEntityInstance * victimPawn, SOURCESDK::CS2::IGameEven
         || (0 != _stricmp(weapon, "hegrenade")
             && 0 != _strnicmp(weapon, "hegrenade_", 10))) return;
 
+    MIRV_POV_DIAGNOSTIC_MESSAGE("[mirv_pov_feedback] HE candidate damage=%d remote=%d ruleOffset=%d\n",
+        event->GetInt(MakeKey("dmg_health")), IsRemotePovPawn(victimPawn),
+        g_clientDllOffsets.C_CSGameRules.m_eRoundWinReason);
+    if(!IsRemotePovPawn(victimPawn)) return;
+
     auto damageKey = MakeKey("dmg_health");
-    if(!event->HasKey(damageKey) || event->GetInt(damageKey) <= 0) return;
+    // Native blast feedback starts at 30 damage, and couples the HE DSP control
+    // with the long flash-ring sound. Do not scale this by remaining health or
+    // add armor damage: player_hurt reports damage before the health-zero clamp.
+    if(!event->HasKey(damageKey) || event->GetInt(damageKey) < 30) return;
+    // The native server handler is disabled after the bomb target explodes.
+    // Its m_bTargetBombed is server-only; use the replicated TargetBombed round
+    // result (1), including when enabling POV or seeking after the explosion.
+    if(g_clientDllOffsets.C_CSGameRules.m_eRoundWinReason < 0) return;
+    bool rulesAvailable = false;
+    const int highestIndex = GetHighestEntityIndex();
+    for(int i = 0; i <= highestIndex; ++i) {
+        CEntityInstance * entity = GetEntityFromIndex(i);
+        if(!entity) continue;
+        const char * className = entity->GetClassName();
+        if(!className || 0 != strcmp(className, "cs_gamerules")) continue;
+        auto rules = *reinterpret_cast<unsigned char **>(
+            reinterpret_cast<unsigned char *>(entity)
+            + g_clientDllOffsets.C_CSGameRulesProxy.m_pGameRules);
+        if(!rules || 1 == *reinterpret_cast<const int *>(
+            rules + g_clientDllOffsets.C_CSGameRules.m_eRoundWinReason)) return;
+        rulesAvailable = true;
+        break;
+    }
+    if(!rulesAvailable) return;
     const bool deafenApplied = ApplyDeafenControl(kHeGrenadeDeafenControlHash);
+    const bool ringPlayed = PlayLocalFlashRing(kLongFlashSoundProfile.ringSound);
     MIRV_POV_DIAGNOSTIC_MESSAGE(
-        "[mirv_pov_feedback] remote POV HE deafen=%d damage=%d\n",
+        "[mirv_pov_feedback] remote POV HE deafen=%d ring=%d damage=%d\n",
         deafenApplied ? 1 : 0,
+        ringPlayed ? 1 : 0,
         event->GetInt(damageKey));
 }
 
@@ -397,6 +469,11 @@ void HandleDeath(SOURCESDK::CS2::IGameEvent * event)
 }
 
 } // namespace
+
+void MirvPovFeedback_ResetDeafen()
+{
+    g_LastFlashDetonation = FlashDetonation();
+}
 
 void MirvPovFeedback_Initialize(HMODULE clientDll)
 {
@@ -565,6 +642,7 @@ void MirvPovFeedback_UpdatePovSelection()
 
 void MirvPovFeedback_ResetPovSelection()
 {
+    g_LastFlashDetonation = FlashDetonation();
     g_LastPovControllerHandle = 0xFFFFFFFFu;
     g_PreviousPovControllerHandle = 0xFFFFFFFFu;
     g_PreviousPovControllerFrame = INT_MIN;
@@ -601,7 +679,16 @@ void MirvPovFeedback_HandleGameEvent(SOURCESDK::CS2::IGameEvent * event)
     if(nullptr == name) return;
 
     __try {
-        if(0 == strcmp(name, "player_blind")) {
+        if(0 == strcmp(name, "flashbang_detonate") || 0 == strcmp(name, "player_blind")) {
+            MIRV_POV_DIAGNOSTIC_MESSAGE("[mirv_pov_feedback] flash event=%s entity=%d userid=%d frame=%d cached=%d/%d\n",
+                name, event->GetInt(MakeKey("entityid")), event->GetInt(MakeKey("userid")),
+                g_MirvTime.framecount_get(), g_LastFlashDetonation.entityIndex, g_LastFlashDetonation.frame);
+        }
+        if(0 == strcmp(name, "flashbang_detonate")) {
+            HandleFlashDetonate(event);
+        } else if(0 == strcmp(name, "round_start")) {
+            g_LastFlashDetonation = FlashDetonation();
+        } else if(0 == strcmp(name, "player_blind")) {
             CEntityInstance * victimPawn = nullptr;
             if(TryGetEventPawn(event, "userid", victimPawn)) {
                 HandlePlayerBlind(victimPawn, event);

@@ -231,8 +231,7 @@ CON_COMMAND(mirv_pov_teamid_debug, "Enable rate-limited mirv_pov TeamID diagnost
     advancedfx::Message("Usage: mirv_pov_teamid_debug <0|1>\n");
 }
 
-#if AFX_MIRV_POV_DIAGNOSTICS
-CON_COMMAND(mirv_pov_debug_feature, "Configure a mirv_pov feature for the next enable cycle.")
+CON_COMMAND(mirv_pov_debug_feature, "Configure a mirv_pov feature. deafen applies immediately; other features apply on the next enable cycle.")
 {
     const int argc = args->ArgC();
     if(1 == argc) {
@@ -265,17 +264,18 @@ CON_COMMAND(mirv_pov_debug_feature, "Configure a mirv_pov feature for the next e
                 "mirv_pov_debug_feature %s %d%s.\n",
                 feature,
                 enable ? 1 : 0,
-                MirvPov_IsEnabled() ? " (pending: run mirv_pov 0, then mirv_pov 1)" : "");
+                MirvPovDebug_IsFeatureImmediate(feature) ? " (immediate)"
+                    : MirvPov_IsEnabled() ? " (pending: run mirv_pov 0, then mirv_pov 1)" : "");
             return;
         }
     }
 
     advancedfx::Message(
         "Usage: mirv_pov_debug_feature <feature|all> <0|1>\n"
-        "Changes made while enabled apply after mirv_pov 0, then mirv_pov 1.\n");
+        "deafen applies immediately; existing audio decays naturally.\n"
+        "Other changes made while enabled apply after mirv_pov 0, then mirv_pov 1.\n");
     MirvPovDebug_PrintFeatureStates();
 }
-#endif
 
 CON_COMMAND(mirv_pov_buymenu, "Sync the observed player's native buy menu during demo playback. Disabled by default; requires mirv_pov.")
 {
@@ -308,16 +308,10 @@ CON_COMMAND(mirv_pov, "POV HUD with radar, feedback, and native pickup prompts. 
 		const char * arg1 = args->ArgV(1);
 				if(0 == _stricmp(arg1, "true") || 0 == _stricmp(arg1, "1") || 0 == _stricmp(arg1, "on")) {
 					HMODULE hClient = GetModuleHandleW(L"client.dll");
-					#if AFX_MIRV_POV_DIAGNOSTICS
 					if(!MirvPov_IsEnabled()) MirvPovDebug_ApplyFeatureConfiguration();
 					if(MirvPovDebug_IsFeatureEnabled("voice_script")) MirvPov_LoadVoiceScript();
 				if(MirvPovDebug_IsFeatureEnabled("cvars")) MirvPov_ApplyCvarSettings();
 				if(MirvPovDebug_IsFeatureEnabled("teamid")) MirvPovTeamID_ApplyPatches(hClient);
-				#else
-				MirvPov_LoadVoiceScript();
-				MirvPov_ApplyCvarSettings();
-				MirvPovTeamID_ApplyPatches(hClient);
-				#endif
 						MirvPov_Enable(hClient);
 					PrintMirvPovEnabledBuild();
 					#if AFX_MIRV_POV_DIAGNOSTICS

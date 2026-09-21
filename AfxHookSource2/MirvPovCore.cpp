@@ -27,11 +27,7 @@
 
 extern SOURCESDK::CS2::ISource2EngineToClient * g_pEngineToClient;
 
-#if AFX_MIRV_POV_DIAGNOSTICS
 #define MIRV_POV_FEATURE_ENABLED(name) MirvPovDebug_IsFeatureEnabled(name)
-#else
-#define MIRV_POV_FEATURE_ENABLED(name) true
-#endif
 
 namespace {
 
@@ -42,11 +38,11 @@ bool g_MirvPovDeathFeedbackEnabled = true;
 bool g_MirvPovHadDemoFile = false;
 thread_local void * g_MirvPovHookReturnAddress = nullptr;
 
-#if AFX_MIRV_POV_DIAGNOSTICS
 struct MirvPovDebugFeatureState {
     const char * name;
     bool configured;
     bool active;
+    bool immediate = false;
 };
 
 MirvPovDebugFeatureState g_MirvPovDebugFeatures[] = {
@@ -61,6 +57,7 @@ MirvPovDebugFeatureState g_MirvPovDebugFeatures[] = {
     {"voice", true, true},
     {"scoreboard", true, true},
     {"feedback", true, true},
+    {"deafen", true, true, true},
     {"deathcam", true, true},
     {"pickupprompt", true, true},
     {"killreward", true, true},
@@ -84,8 +81,6 @@ MirvPovDebugFeatureState * FindMirvPovDebugFeature(const char * name)
     }
     return nullptr;
 }
-#endif
-
 CEntityInstance * GetPawnFromController(CEntityInstance * controller)
 {
     if(nullptr == controller || !controller->IsPlayerController()) return nullptr;
@@ -130,7 +125,6 @@ CEntityInstance * ResolveConfiguredPovPlayerController()
 
 } // namespace
 
-#if AFX_MIRV_POV_DIAGNOSTICS
 bool MirvPovDebug_CanConfigure()
 {
     return true;
@@ -139,6 +133,12 @@ bool MirvPovDebug_CanConfigure()
 bool MirvPovDebug_HasFeature(const char * name)
 {
     return nullptr != FindMirvPovDebugFeature(name);
+}
+
+bool MirvPovDebug_IsFeatureImmediate(const char * name)
+{
+    auto * feature = FindMirvPovDebugFeature(name);
+    return feature && feature->immediate;
 }
 
 bool MirvPovDebug_IsFeatureEnabled(const char * name)
@@ -150,12 +150,20 @@ bool MirvPovDebug_IsFeatureEnabled(const char * name)
 bool MirvPovDebug_SetFeatureEnabled(const char * name, bool enabled)
 {
     if(nullptr != name && 0 == _stricmp(name, "all")) {
-        for(auto & feature : g_MirvPovDebugFeatures) feature.configured = enabled;
+        for(auto & feature : g_MirvPovDebugFeatures) {
+            feature.configured = enabled;
+            if(feature.immediate) feature.active = enabled;
+        }
+        MirvPovFeedback_ResetDeafen();
         return true;
     }
     MirvPovDebugFeatureState * feature = FindMirvPovDebugFeature(name);
     if(nullptr == feature) return false;
     feature->configured = enabled;
+    if(feature->immediate) {
+        feature->active = enabled;
+        if(0 == _stricmp(feature->name, "deafen")) MirvPovFeedback_ResetDeafen();
+    }
     return true;
 }
 
@@ -166,20 +174,18 @@ void MirvPovDebug_ApplyFeatureConfiguration()
 
 void MirvPovDebug_PrintFeatureStates()
 {
-    MIRV_POV_DIAGNOSTIC_MESSAGE(
+    advancedfx::Message(
         "mirv_pov debug features (%s):\n",
         MirvPov_IsEnabled() ? "active / configured for next enable" : "inactive / configured");
     for(const auto & feature : g_MirvPovDebugFeatures) {
-        MIRV_POV_DIAGNOSTIC_MESSAGE(
+        advancedfx::Message(
             "  %-14s active=%d configured=%d%s\n",
             feature.name,
             feature.active ? 1 : 0,
             feature.configured ? 1 : 0,
-            feature.active != feature.configured ? " (pending)" : "");
+            feature.active != feature.configured ? " (pending)" : feature.immediate ? " (immediate)" : "");
     }
 }
-#endif
-
 bool MirvPov_IsEnabled()
 {
     return g_MirvPovEnabled;
@@ -335,9 +341,7 @@ void MirvPov_UpdateSeekDetection()
 void MirvPov_OnFrameStageBefore(int frameStage)
 {
     if(SOURCESDK::CS2::FRAME_RENDER_PASS != frameStage) return;
-#if AFX_MIRV_POV_DIAGNOSTICS
     if(!MIRV_POV_FEATURE_ENABLED("framestage")) return;
-#endif
 
     if(MIRV_POV_FEATURE_ENABLED("voice")) MirvPovVoice_OnRenderPass();
     if(MIRV_POV_FEATURE_ENABLED("voiceban")) MirvPovVoiceBan_OnRenderPass();
@@ -347,9 +351,7 @@ void MirvPov_OnFrameStageBefore(int frameStage)
 void MirvPov_OnFrameStageAfter(int frameStage)
 {
     if(SOURCESDK::CS2::FRAME_RENDER_PASS == frameStage) {
-#if AFX_MIRV_POV_DIAGNOSTICS
         if(!MIRV_POV_FEATURE_ENABLED("framestage")) return;
-#endif
         // Run after the game's native FrameStageNotify. Observer target and
         // Pawn state are committed there; sampling them before the original
         // call shifts fade cleanup and replay timing by one frame.
@@ -404,9 +406,7 @@ void MirvPov_Enable(HMODULE clientDll)
 {
     if(g_MirvPovEnabled) return;
 
-#if AFX_MIRV_POV_DIAGNOSTICS
     MirvPovDebug_ApplyFeatureConfiguration();
-#endif
     g_MirvPovAutoSync = true;
     MirvPovScoreboard_Reset();
     if(MIRV_POV_FEATURE_ENABLED("soundcircle")) MirvPovSoundCircle_Initialize(clientDll);
