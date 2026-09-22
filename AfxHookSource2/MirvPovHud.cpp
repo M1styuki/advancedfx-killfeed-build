@@ -6,6 +6,7 @@
 #include "MirvPanorama.h"
 #include "MirvPovCore.h"
 #include "Globals.h"
+#include "SchemaSystem.h"
 
 #include "../shared/AfxConsole.h"
 #include "../shared/binutils.h"
@@ -20,6 +21,8 @@
 #pragma intrinsic(_ReturnAddress)
 
 static void* g_PovStylePropertyVisibleVtable = nullptr;
+static void* g_PovStylePropertyHeightVtable = nullptr;
+static void* g_PovPanelStyleVtable = nullptr;
 
 typedef void(__fastcall * PovPanelStyleSetStyleProperty_t)(void* This, void* property, bool transition);
 static PovPanelStyleSetStyleProperty_t g_PovPanelStyleSetStyleProperty = nullptr;
@@ -143,31 +146,79 @@ static bool MirvPovHud_PanelContainsId(unsigned char* parentPanel, const char* p
     return nullptr != MirvPovHud_FindPanelById(parentPanel, panelId);
 }
 
-static void MirvPovHud_SetPanelsWithClassVisible(
+// CStylePropertyHeight uses a pixel length (unit 1). Let Panorama apply the
+// existing AvatarL__name height transition instead of collapsing visibility.
+struct PovStylePropertyHeight {
+    void* vtable;
+    uint8_t id;
+    bool disallowTransition = false;
+    unsigned char pad[6] = {};
+    float value;
+    uint32_t unit = 1;
+};
+static_assert(sizeof(PovStylePropertyHeight) == 24, "Panorama height property layout");
+
+static int g_GameRulesEntityIndex = -1;
+
+static bool MirvPovHud_GetRoundDowntime(bool& downtime) {
+    const auto& offsets = g_clientDllOffsets.C_CSGameRules;
+    if(offsets.m_bFreezePeriod < 0 || offsets.m_eRoundWinReason < 0) return false;
+    auto entity = GetEntityFromIndex(g_GameRulesEntityIndex);
+    if(!entity || !entity->GetClassName() || strcmp(entity->GetClassName(), "cs_gamerules")) {
+        g_GameRulesEntityIndex = -1;
+        const int highestIndex = GetHighestEntityIndex();
+        for(int i = 0; i <= highestIndex; ++i) {
+            entity = GetEntityFromIndex(i);
+            if(entity && entity->GetClassName() && !strcmp(entity->GetClassName(), "cs_gamerules")) {
+                g_GameRulesEntityIndex = i;
+                break;
+            }
+        }
+        if(g_GameRulesEntityIndex < 0) return false;
+    }
+    auto rules = *reinterpret_cast<unsigned char**>(reinterpret_cast<unsigned char*>(entity)
+        + g_clientDllOffsets.C_CSGameRulesProxy.m_pGameRules);
+    if(!rules) return false;
+    downtime = *reinterpret_cast<const bool*>(rules + offsets.m_bFreezePeriod)
+        || *reinterpret_cast<const int*>(rules + offsets.m_eRoundWinReason) != 0;
+    return true;
+}
+
+static void MirvPovHud_SetPlayerNameHeights(
     unsigned char* panel,
     short classSymbol,
-    bool visible,
-    bool followRoundState) {
+    uint8_t heightId,
+    bool enabled,
+    bool downtime,
+    bool competitive = false) {
     if(!panel) return;
-
-    // Native hudteamcounter.css uses an ancestor selector. TeamCounter owns
-    // ROUNDDOWNTIME; it is not a class on the outer HUD panel. FREEZETIME
-    // also covers the initial round before any round_end has been dispatched.
-    if(followRoundState && !visible)
-        visible = Panorama_HasPanelClass(panel, "ROUNDDOWNTIME")
-            || Panorama_HasPanelClass(panel, "FREEZETIME");
+    competitive = competitive || Panorama_HasPanelClass(panel, "competitive")
+        || Panorama_HasPanelClass(panel, "scrimcomp2v2");
 
     auto vtable = *(void***)panel;
     if(vtable) {
         using HasPanelClass_t = bool (__fastcall *)(void*, short);
         auto hasPanelClass = reinterpret_cast<HasPanelClass_t>(vtable[157]);
         if(hasPanelClass && hasPanelClass(panel, classSymbol)) {
-            const bool applied = MirvPovHud_SetPanelVisible(panel, visible);
+            auto style = panel + CS2::PanoramaUIPanel::panelStyle;
+            if(*reinterpret_cast<void**>(style) == g_PovPanelStyleVtable) {
+                if(enabled && competitive) {
+                    PovStylePropertyHeight property{g_PovStylePropertyHeightVtable, heightId, false, {}, downtime ? 14.0f : 0.0f};
+                    g_PovPanelStyleSetStyleProperty(style, &property, true);
+                    MirvPovHud_SetNativePanelClass(panel, "afx-pov-playernames", true);
+                } else if(Panorama_HasPanelClass(panel, "afx-pov-playernames")) {
+                    // Remove only our height override and recompute the native
+                    // CSS cascade. Never reset other inline panel properties.
+                    using ClearProperty_t = void (__fastcall *)(void*, uint8_t);
+                    reinterpret_cast<ClearProperty_t>((*reinterpret_cast<void***>(style))[151])(style, heightId);
+                    MirvPovHud_SetNativePanelClass(panel, "afx-pov-playernames", false);
+                }
+            }
 #if AFX_MIRV_POV_DIAGNOSTICS
             static int lastState = -1;
-            const int state = visible ? 1 : 0;
-            if(followRoundState && (lastState != state || !applied)) {
-                advancedfx::Message("[mirv_pov_hud] player names visible=%d applied=%d\n", state, applied ? 1 : 0);
+            const int state = enabled && competitive ? (downtime ? 14 : 0) : -2;
+            if(lastState != state) {
+                advancedfx::Message("[mirv_pov_hud] player names height=%d (native transition)\n", state);
                 lastState = state;
             }
 #endif
@@ -177,29 +228,29 @@ static void MirvPovHud_SetPanelsWithClassVisible(
     const auto children = panel + CS2::PanoramaUIPanel::children;
     const auto childCount = *(int*)children;
     for(int i = 0; i < childCount; ++i) {
-        MirvPovHud_SetPanelsWithClassVisible(
+        MirvPovHud_SetPlayerNameHeights(
             ((unsigned char***)children)[1][i],
-            classSymbol,
-            visible,
-            followRoundState);
+            classSymbol, heightId, enabled, downtime, competitive);
     }
 }
 
-static void MirvPovHud_SetTeamCounterPlayerNamesVisible(bool visible, bool followRoundState = false) {
+static void MirvPovHud_RefreshTeamCounterPlayerNames(bool restore = false) {
+    if(!g_PovStylePropertyHeightVtable || !g_PovPanelStyleVtable
+        || !g_PovPanelStyleSetStyleProperty || !g_PovResolveStyleProperty) return;
     __try {
         auto hudPanel = MirvPovHud_GetHudPanel();
         if(!hudPanel) return;
 
         short nameClass = -1;
         if(!MirvPovHud_MakeSymbol("AvatarL__name", nameClass)) return;
-        MirvPovHud_SetPanelsWithClassVisible(hudPanel, nameClass, visible, followRoundState);
+        uint8_t heightId = 0xFF;
+        g_PovResolveStyleProperty(&heightId, "height");
+        if(heightId == 0xFF) return;
+        bool downtime = false;
+        const bool enabled = !restore && MIRV_POV_FEATURE_ACTIVE("hud")
+            && MirvPovHud_GetRoundDowntime(downtime);
+        MirvPovHud_SetPlayerNameHeights(hudPanel, nameClass, heightId, enabled, downtime);
     } __except(EXCEPTION_EXECUTE_HANDLER) {}
-}
-
-static void MirvPovHud_RefreshTeamCounterPlayerNames() {
-    // Native alive POV CSS shows names only while ROUNDDOWNTIME is set. The
-    // real spectator root otherwise keeps them visible throughout the round.
-    MirvPovHud_SetTeamCounterPlayerNamesVisible(false, true);
 }
 
 static bool MirvPovHud_SetStrokeSiblingVisibleForAnchor(unsigned char* parentPanel, const char* anchorId, bool visible) {
@@ -404,6 +455,10 @@ void MirvPovHud_OnPanoramaLayoutFileLoaded(const char* filePath) {
 }
 
 void MirvPovHud_OnPanoramaDllLoaded(HMODULE panoramaDll) {
+    g_PovStylePropertyHeightVtable = (void*)Afx::BinUtils::FindClassVtable(
+        panoramaDll, ".?AVCStylePropertyHeight@panorama@@", 0, 0);
+    g_PovPanelStyleVtable = (void*)Afx::BinUtils::FindClassVtable(
+        panoramaDll, ".?AVCPanelStyle@panorama@@", 0, 0);
     g_PovStylePropertyVisibleVtable = (void**)Afx::BinUtils::FindClassVtable(
         panoramaDll,
         ".?AVCStylePropertyVisible@panorama@@",
@@ -438,6 +493,7 @@ static int g_ScoreboardSeekSuppressFrames = 0;
 static int g_LastDemoTick = -1;
 
 void MirvPovHud_OnLevelInitPreEntity() {
+    g_GameRulesEntityIndex = -1;
     MirvPovHud_ResetPanelState();
     g_ScoreboardSeekSuppressFrames = 0;
     g_LastDemoTick = -1;
@@ -625,7 +681,7 @@ void MirvPovHud_RemovePatches() {
         }
     } __except(EXCEPTION_EXECUTE_HANDLER) {}
     MirvPovHud_SetSpectatorHotKeyLabelsVisible(true);
-    MirvPovHud_SetTeamCounterPlayerNamesVisible(true);
+    MirvPovHud_RefreshTeamCounterPlayerNames(true);
     MirvPovHud_ResetPanelState();
     g_ScoreboardSeekSuppressFrames = 0;
     g_LastDemoTick = -1;

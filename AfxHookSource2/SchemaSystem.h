@@ -17,6 +17,7 @@ struct ClientDllOffsets_t {
 		ptrdiff_t m_gamePhase = 0; // int32
 		ptrdiff_t m_nOvertimePlaying = 0; // int32
 		ptrdiff_t m_eRoundWinReason = -1; // int, optional
+		ptrdiff_t m_bFreezePeriod = -1; // bool, optional
 	} C_CSGameRules;
 
 	struct CEntityInstance {

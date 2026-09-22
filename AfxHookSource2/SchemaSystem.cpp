@@ -93,6 +93,7 @@ void initSchemaSystemOffsets()
 	bOk = bOk && getOffset(&g_clientDllOffsets.C_CSGameRules.m_gamePhase, "client.dll", "C_CSGameRules", "m_gamePhase");
 	bOk = bOk && getOffset(&g_clientDllOffsets.C_CSGameRules.m_nOvertimePlaying, "client.dll", "C_CSGameRules", "m_nOvertimePlaying");
 	getOffset(&g_clientDllOffsets.C_CSGameRules.m_eRoundWinReason, "client.dll", "C_CSGameRules", "m_eRoundWinReason");
+	getOffset(&g_clientDllOffsets.C_CSGameRules.m_bFreezePeriod, "client.dll", "C_CSGameRules", "m_bFreezePeriod");
 	bOk = bOk && getOffset(&g_clientDllOffsets.CEntityInstance.m_pEntity, "client.dll", "CEntityInstance", "m_pEntity");
 	bOk = bOk && getOffset(&g_clientDllOffsets.C_BaseEntity.m_pGameSceneNode, "client.dll", "C_BaseEntity", "m_pGameSceneNode");
 	bOk = bOk && getOffset(&g_clientDllOffsets.C_BaseEntity.m_iHealth, "client.dll", "C_BaseEntity", "m_iHealth");
