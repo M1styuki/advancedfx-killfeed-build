@@ -32,6 +32,7 @@
 #include <set>
 #include <algorithm>
 #include <vector>
+#include <string>
 
 // TODO: move panorama stuff out after addresses.cpp is done
 // decompose/change myPanoramaWrapper too
@@ -709,6 +710,8 @@ private:
 	}
 
 public:
+	bool AllowsDeathMsgOverrides() const { return m_AllowDeathMsgOverrides; }
+
 	virtual ~MyDeathMsgGameEventWrapper() {};
 	virtual const char *GetName() const {
 		return m_Event->GetName();
@@ -869,7 +872,7 @@ struct CS2_MirvDeathMsgGlobals : MirvDeathMsgGlobals {
 	bool localTokenHooked = false;
 } g_MirvDeathMsgGlobals;
 
-// The native DeathPanel handler synchronously queries the temporary event
+// The native HUD handlers synchronously query the temporary event
 // through the local-token helper. Keep this state thread-local and restore it
 // with RAII so an exception or an early return can never leave a dangling
 // pointer to the stack wrapper behind.
@@ -904,8 +907,10 @@ static bool DeathMsg_ShouldProcessCustomPath() {
 }
 
 static bool DeathMsg_ShouldProcessLocalTokenPath() {
+	// A shared native helper must not apply killfeed overrides to DeathPanel
+	// or any other caller, including the POV-only event proxy.
 	return nullptr != g_ActiveDeathMsgWrapper
-		|| g_MirvDeathMsgGlobals.useHighlightId;
+		&& g_ActiveDeathMsgWrapper->AllowsDeathMsgOverrides();
 }
 
 static bool DeathMsg_ShouldProcessPanoramaPath() {
@@ -952,16 +957,15 @@ static int ResolveDeathMsgEntityIndex(const DeathMsgId & id) {
 
 uint32_t __fastcall getLocalSteamId(void* param_1) {
 	// getLocalSteamId is queried repeatedly by the native death-notice UI.
-	// Keep the global hook a transparent pass-through until POV/deathmsg
-	// customization is actually active; this removes the per-frame work and
-	// prevents ordinary spectator mode from touching stale custom state.
-		if(!DeathMsg_ShouldProcessLocalTokenPath()) {
+	// Override it only during the synchronous killfeed handler call.
+	if(!DeathMsg_ShouldProcessLocalTokenPath()) {
 		return nullptr != g_Original_getLocalSteamId
 			? g_Original_getLocalSteamId(param_1)
 			: 0;
 	}
 
 	MyDeathMsgPlayerEntry entry;
+	entry.isLocal.value = false;
 	bool overrideLocal = false;
 	if (nullptr != g_ActiveDeathMsgWrapper) {
 		auto & wrapper = *g_ActiveDeathMsgWrapper;
@@ -975,10 +979,11 @@ uint32_t __fastcall getLocalSteamId(void* param_1) {
 		else if (wrapper.victim.isLocal.use && wrapper.victim.isLocal.value) {
 			entry = wrapper.victim;
 		}
-			else if (wrapper.assister.isLocal.use && wrapper.assister.isLocal.value) {
-				entry = wrapper.assister;
+		else if (wrapper.assister.isLocal.use && wrapper.assister.isLocal.value) {
+			entry = wrapper.assister;
 		}
-				overrideLocal = true;
+		overrideLocal = wrapper.attacker.isLocal.use
+			|| wrapper.victim.isLocal.use || wrapper.assister.isLocal.use;
 	}
 
 	if (g_MirvDeathMsgGlobals.useHighlightId) {
@@ -988,7 +993,8 @@ uint32_t __fastcall getLocalSteamId(void* param_1) {
 	}
 
 	if (overrideLocal) {
-		uint32_t result = static_cast<uint32_t>(ResolveDeathMsgEntityIndex(entry.newId.value));
+		uint32_t result = entry.isLocal.value
+			? static_cast<uint32_t>(ResolveDeathMsgEntityIndex(entry.newId.value)) : 0;
 		return result;
 	}
 
@@ -999,7 +1005,7 @@ uint32_t __fastcall getLocalSteamId(void* param_1) {
 
 // RCX is the CGameEventListener subobject at CCSGO_HudDeathPanel + 0x20.
 // RDX is IGameEvent. The current client listener has a real two-argument ABI.
-static u_char * __fastcall handleDeathnotice(
+static u_char * __fastcall HandleHudDeathPanel(
 	u_char * hudDeathNotice,
 	SOURCESDK::CS2::IGameEvent * gameEvent);
 
@@ -1201,7 +1207,7 @@ static void DeathPanel_MarkTouched(u_char * deathPanel)
 	}
 
 
-static u_char * InvokeDeathNoticeHandler(
+static u_char * InvokeDeathPanelHandler(
 	u_char * hudDeathNotice,
 	SOURCESDK::CS2::IGameEvent * gameEvent,
 	unsigned long & exceptionCode)
@@ -1296,7 +1302,7 @@ static DeathPanelModeResult DeathPanel_RunMode(
 		return result;
 	}
 
-	result.handlerResult = InvokeDeathNoticeHandler(
+	result.handlerResult = InvokeDeathPanelHandler(
 		listenerSubobject,
 		listenerEvent,
 		result.handlerException);
@@ -1436,7 +1442,7 @@ static u_char * HandleNativePovDeathPanel(
 	// object and override only the local Pawn during this synchronous call.
 	if(!povVictim || nullptr == victimPawn) {
 		unsigned long handlerExceptionCode = 0;
-		u_char * result = InvokeDeathNoticeHandler(
+		u_char * result = InvokeDeathPanelHandler(
 			listenerSubobject,
 			gameEvent,
 			handlerExceptionCode);
@@ -1468,7 +1474,7 @@ static u_char * HandleNativePovDeathPanel(
 		// is actually missing or stale.
 			// POV-only remapping must preserve every real player_death field,
 			// including headshot. DeathMsg filters remain enabled in the separate
-			// non-POV customization path below.
+			// independent HudDeathNotice handler.
 			MyDeathMsgGameEventWrapper povEvent(gameEvent, false);
 		SOURCESDK::CS2::IGameEvent * nativeEvent = gameEvent;
 		bool eventRemapped = false;
@@ -1528,11 +1534,11 @@ static bool DeathPanel_IsPlayerDeathEvent(
 	}
 }
 
-u_char * __fastcall handleDeathnotice(
+static u_char * __fastcall HandleHudDeathPanel(
 	u_char * hudDeathNotice,
 	SOURCESDK::CS2::IGameEvent * gameEvent)
 {
-
+	DeathMsgActiveWrapperGuard isolatedWrapper(nullptr);
 	if (nullptr == g_MirvPovDeathPanelState.originalHandlePlayerDeath) {
 		return nullptr;
 	}
@@ -1549,78 +1555,79 @@ u_char * __fastcall handleDeathnotice(
 	unsigned long eventNameExceptionCode = 0;
 	if(!DeathPanel_IsPlayerDeathEvent(gameEvent, eventNameExceptionCode)) {
 		unsigned long passThroughExceptionCode = 0;
-		u_char * result = InvokeDeathNoticeHandler(
+		u_char * result = InvokeDeathPanelHandler(
 			hudDeathNotice,
 			gameEvent,
 			passThroughExceptionCode);
-			return result;
-	}
-
-	// Every POV DeathPanel mode stays on the game's native IGameEvent object.
-	// The old wrapper's GetString ABI is not compatible with the current game
-	// and previously produced the 0x6e00 crash. Explicit mirv_deathmsg
-	// transformations therefore remain available only outside mirv_pov.
-	if(MirvPov_IsEnabled() && MirvPov_IsDeathFeedbackEnabled()) {
-		u_char * result = HandleNativePovDeathPanel(hudDeathNotice, gameEvent);
 		return result;
 	}
 
-	// Preserve the native handler exactly when neither mirv_pov nor any
-	// mirv_deathmsg customization is active. This is the common path during
-	// normal spectator playback and avoids all wrapper/entity/panel access.
-	if(!DeathMsg_ShouldProcessCustomPath()) {
-			unsigned long passThroughExceptionCode = 0;
-			u_char * result = InvokeDeathNoticeHandler(
-				hudDeathNotice, gameEvent, passThroughExceptionCode);
-				return result;
-		}
+	if(MirvPov_IsEnabled() && MirvPov_IsDeathFeedbackEnabled()) {
+		return HandleNativePovDeathPanel(hudDeathNotice, gameEvent);
+	}
 
-		// The temporary event wrapper needs the client hash helper. If its
-		// pattern is unavailable, preserve the native player_death path instead
-		// of dereferencing a null function pointer while building key symbols.
-		if (nullptr == g_MirvPovHashString) {
-				unsigned long passThroughExceptionCode = 0;
-				u_char * result = InvokeDeathNoticeHandler(
-					hudDeathNotice, gameEvent, passThroughExceptionCode);
-				return result;
-		}
+	unsigned long exceptionCode = 0;
+	return InvokeDeathPanelHandler(hudDeathNotice, gameEvent, exceptionCode);
+}
 
-		bool lifetimeOffsetsReady =
-		0 != AFXADDR_GET(cs2_deathmsg_lifetime_offset)
-		&& 0 != AFXADDR_GET(cs2_deathmsg_lifetimemod_offset);
-	uint8_t lifetimeOffset = 0;
-	uint8_t lifetimeModOffset = 0;
-	float *pDeathNoticeLifetime = nullptr;
-	float *pDeathNoticeLocalPlayerLifetimeMod = nullptr;
-	float orgDeathNoticeLifetime = 0.0f;
-	float orgDeathNoticeLocalPlayerLifetimeMod = 0.0f;
+// CCSGO_HudDeathNotice player_death handler (upstream ABI), not the
+// CCSGO_HudDeathPanel CGameEventListener subobject at owner + 0x20.
+using HudDeathNoticePlayerDeath_t = void (__fastcall *)(
+	u_char *, SOURCESDK::CS2::IGameEvent *);
+static HudDeathNoticePlayerDeath_t g_OriginalHudDeathNoticePlayerDeath = nullptr;
 
-	if (lifetimeOffsetsReady) {
-		lifetimeOffset = (uint8_t)AFXADDR_GET(cs2_deathmsg_lifetime_offset);
-		lifetimeModOffset = (uint8_t)AFXADDR_GET(cs2_deathmsg_lifetimemod_offset);
-		if (nullptr != hudDeathNotice) {
-			pDeathNoticeLifetime = (float *)(hudDeathNotice + lifetimeOffset);
-			pDeathNoticeLocalPlayerLifetimeMod = (float *)(hudDeathNotice + lifetimeModOffset);
-		}
-		}
+// Keep SEH outside the C++ scope holding the temporary wrapper and guards.
+static void InvokeHudDeathNoticeHandler(
+	u_char * hudDeathNotice, SOURCESDK::CS2::IGameEvent * gameEvent)
+{
+	__try {
+		g_OriginalHudDeathNoticePlayerDeath(hudDeathNotice, gameEvent);
+	} __except(EXCEPTION_EXECUTE_HANDLER) {
+		advancedfx::Warning("AFXERROR: HudDeathNotice handler exception 0x%08lx.\n", GetExceptionCode());
+	}
+}
 
-		MyDeathMsgGameEventWrapper myWrapper(gameEvent);
-		const auto weaponKey = myWrapper.hashString("weapon");
-		const char * weaponName = gameEvent->GetString(weaponKey);
-			if(nullptr == weaponName || '\0' == weaponName[0]) {
-				// The native handler intentionally drops events without a weapon.
-				// Preserve that contract before applying any POV overrides.
-					unsigned long passThroughExceptionCode = 0;
-					u_char * result = InvokeDeathNoticeHandler(
-						hudDeathNotice, gameEvent, passThroughExceptionCode);
-					if(0 != passThroughExceptionCode && false) {
-					advancedfx::Warning(
-						"[mirv_pov_feedback] native DeathNotice no-weapon pass-through "
-						"exception code=0x%08lx\n",
-						passThroughExceptionCode);
-				}
-					return result;
-			}
+// Controller names are shared with the independent DeathPanel listener.
+// Restore temporary killfeed overrides before the next listener runs.
+class DeathMsgNameGuard {
+public:
+	explicit DeathMsgNameGuard(SOURCESDK::CS2::CEntityInstance * controller)
+		: m_Name(nullptr) {
+		if(nullptr != controller) {
+			m_Name = reinterpret_cast<SOURCESDK::CS2::CUtlString *>(
+				reinterpret_cast<u_char *>(controller)
+				+ g_clientDllOffsets.CCSPlayerController.m_sSanitizedPlayerName);
+			m_Original = m_Name->Get();
+		}
+	}
+	~DeathMsgNameGuard() { if(nullptr != m_Name) m_Name->Set(m_Original.c_str()); }
+	DeathMsgNameGuard(const DeathMsgNameGuard &) = delete;
+	DeathMsgNameGuard & operator=(const DeathMsgNameGuard &) = delete;
+private:
+	SOURCESDK::CS2::CUtlString * m_Name;
+	std::string m_Original;
+};
+
+static void __fastcall HandleHudDeathNotice(
+	u_char * hudDeathNotice, SOURCESDK::CS2::IGameEvent * gameEvent)
+{
+	DeathMsgActiveWrapperGuard isolatedWrapper(nullptr);
+	if(nullptr == hudDeathNotice || nullptr == gameEvent
+		|| nullptr == g_MirvPovHashString || !DeathMsg_ShouldProcessCustomPath()) {
+		InvokeHudDeathNoticeHandler(hudDeathNotice, gameEvent);
+		return;
+	}
+
+	// These offsets are resolved by Addresses_InitClientDll before HookDeathMsg.
+	// Missing offsets disable lifetime writes only; filter/block still work.
+	const bool lifetimeOffsetsReady = AFXADDR_GET(cs2_deathmsg_lifetime_offset)
+		&& AFXADDR_GET(cs2_deathmsg_lifetimemod_offset);
+	float * pDeathNoticeLifetime = lifetimeOffsetsReady
+		? reinterpret_cast<float *>(hudDeathNotice + AFXADDR_GET(cs2_deathmsg_lifetime_offset)) : nullptr;
+	float * pDeathNoticeLocalPlayerLifetimeMod = lifetimeOffsetsReady
+		? reinterpret_cast<float *>(hudDeathNotice + AFXADDR_GET(cs2_deathmsg_lifetimemod_offset)) : nullptr;
+	float orgDeathNoticeLifetime = 0.0f, orgDeathNoticeLocalPlayerLifetimeMod = 0.0f;
+	MyDeathMsgGameEventWrapper myWrapper(gameEvent);
 
 	auto uidAttacker = (int)(int16_t)gameEvent->GetInt(myWrapper.hashString("attacker"));
 	auto uidVictim = (int)(int16_t)gameEvent->GetInt(myWrapper.hashString("userid"));
@@ -1633,11 +1640,6 @@ u_char * __fastcall handleDeathnotice(
 	auto attackerController = gameEvent->GetPlayerController(myWrapper.hashString("attacker"));
 	auto victimController = gameEvent->GetPlayerController(myWrapper.hashString("userid"));
 	auto assisterController = gameEvent->GetPlayerController(myWrapper.hashString("assister"));
-			const auto userIdKey = myWrapper.hashString("userid");
-			auto victimPawn = DeathPanel_ResolveEventVictimPawn(
-				gameEvent,
-				userIdKey,
-				victimController);
 
 	if (g_MirvDeathMsgGlobals.Settings.Debug)
 	{
@@ -1737,26 +1739,7 @@ u_char * __fastcall handleDeathnotice(
 	}
 
 	if (myWrapper.block.use && myWrapper.block.value) {
-			return nullptr;
-	}
-
-	// The native death notice decides which entry is "local" through its
-	// local-SteamID helper. In POV mode the watched player is not the real
-	// split-screen player, so expose the watched controller as local while the
-	// original Panorama handler processes this event.
-		if (MirvPov_IsEnabled()) {
-			auto povController = GetCurrentPovPlayerController();
-			if (nullptr == povController) {
-				povController = GetObservedPlayerController();
-			}
-		if (nullptr != povController) {
-			myWrapper.attacker.isLocal.use = true;
-			myWrapper.attacker.isLocal.value = reinterpret_cast<void *>(attackerController) == reinterpret_cast<void *>(povController);
-			myWrapper.victim.isLocal.use = true;
-			myWrapper.victim.isLocal.value = reinterpret_cast<void *>(victimController) == reinterpret_cast<void *>(povController);
-			myWrapper.assister.isLocal.use = true;
-			myWrapper.assister.isLocal.value = reinterpret_cast<void *>(assisterController) == reinterpret_cast<void *>(povController);
-			}
+		return;
 	}
 
 	if (g_MirvDeathMsgGlobals.useHighlightId)
@@ -1770,6 +1753,10 @@ u_char * __fastcall handleDeathnotice(
 		myWrapper.assister.isLocal.use = true;
 		myWrapper.assister.isLocal.value = g_MirvDeathMsgGlobals.highlightId.EqualsUserId(uidAssister);
 	}
+
+	DeathMsgNameGuard attackerName(myWrapper.attacker.name.use ? attackerController : nullptr);
+	DeathMsgNameGuard victimName(myWrapper.victim.name.use ? victimController : nullptr);
+	DeathMsgNameGuard assisterName(myWrapper.assister.name.use ? assisterController : nullptr);
 
 	if (myWrapper.attacker.name.use && nullptr != attackerController) {
 		((SOURCESDK::CS2::CUtlString *)((u_char*)attackerController + g_clientDllOffsets.CCSPlayerController.m_sSanitizedPlayerName))->Set(myWrapper.attacker.name.value);
@@ -1795,63 +1782,26 @@ u_char * __fastcall handleDeathnotice(
 		myWrapper.lifetimeMod.value = g_MirvDeathMsgGlobals.LifetimeMod.value;
 	}
 
-	if (lifetimeOffsetsReady && nullptr != pDeathNoticeLifetime && myWrapper.lifetime.use)
+	if (lifetimeOffsetsReady && myWrapper.lifetime.use)
 	{
 		orgDeathNoticeLifetime = *pDeathNoticeLifetime;
 		*pDeathNoticeLifetime = myWrapper.lifetime.value;
 	}
 
-	if (lifetimeOffsetsReady && nullptr != pDeathNoticeLocalPlayerLifetimeMod && myWrapper.lifetimeMod.use)
+	if (lifetimeOffsetsReady && myWrapper.lifetimeMod.use)
 	{
 		orgDeathNoticeLocalPlayerLifetimeMod = *pDeathNoticeLocalPlayerLifetimeMod;
 		*pDeathNoticeLocalPlayerLifetimeMod = myWrapper.lifetimeMod.value;
 	}
 
-				const bool povVictim = MirvPov_IsEnabled()
-					&& MirvPov_IsDeathFeedbackEnabled()
-					&& MirvPovFeedback_IsLocalPlayerVictim(gameEvent);
-				CEntityInstance * deathPanelPovPawn = povVictim ? victimPawn : nullptr;
-					if(povVictim && nullptr == deathPanelPovPawn) {
-						deathPanelPovPawn = GetCurrentPovPlayerPawn();
-					}
-					if(povVictim) {
-						// Keep the original event values, but guarantee that the native
-						// DeathPanel listener resolves userid to the same Pawn returned by
-						// its temporarily overridden local-player getter.
-						myWrapper.SetNativeLocalVictimRemap(
-							victimController,
-							reinterpret_cast<SOURCESDK::CS2::CEntityInstance *>(deathPanelPovPawn),
-							-1);
-					}
+	DeathMsgActiveWrapperGuard activeWrapperGuard(&myWrapper);
+	InvokeHudDeathNoticeHandler(hudDeathNotice, &myWrapper);
 
-					DeathMsgActiveWrapperGuard activeWrapperGuard(&myWrapper);
-					DeathPanelLocalPawnOverrideGuard localPawnOverrideGuard(deathPanelPovPawn);
-					DeathPanelReplayGateGuard replayGate(povVictim);
-
-					unsigned long handlerExceptionCode = 0;
-					u_char * result = nullptr;
-					DeathPanelModeResult modeResult;
-					if(povVictim) {
-						modeResult = DeathPanel_RunMode(
-							hudDeathNotice,
-							&myWrapper);
-						result = modeResult.handlerResult;
-						handlerExceptionCode = modeResult.handlerException;
-					} else {
-						result = InvokeDeathNoticeHandler(
-							hudDeathNotice,
-							&myWrapper,
-							handlerExceptionCode);
-					}
-		if (lifetimeOffsetsReady && nullptr != pDeathNoticeLocalPlayerLifetimeMod && myWrapper.lifetimeMod.use) {
+	if (lifetimeOffsetsReady && myWrapper.lifetimeMod.use)
 		*pDeathNoticeLocalPlayerLifetimeMod = orgDeathNoticeLocalPlayerLifetimeMod;
-	}
-		if (lifetimeOffsetsReady && nullptr != pDeathNoticeLifetime && myWrapper.lifetime.use) {
+	if (lifetimeOffsetsReady && myWrapper.lifetime.use)
 		*pDeathNoticeLifetime = orgDeathNoticeLifetime;
-	}
-
-		return result;
-};
+}
 
 
 typedef int (__fastcall * Panorama_CLayoutFile_LoadFromFile_t)(void * This, const char * pFilePath, unsigned char _unk02);
@@ -2074,7 +2024,7 @@ LAB_1809a7de1
 bool getPanoramaAddrs(HMODULE panoramaDll) {
 
 	// Refernces "CLayoutFile::LoadFromFile" string.
-	g_Org_Panorama_CLayoutFile_LoadFromFile = (Panorama_CLayoutFile_LoadFromFile_t)getAddress(panoramaDll,"48 89 5C 24 08 55 56 57 41 54 41 55 41 56 41 57 48 8B EC 48 83 EC 60 48 8D 05 ?? ?? ?? ?? 48 C7 45 D0 F4 03 00 00 48");
+	g_Org_Panorama_CLayoutFile_LoadFromFile = (Panorama_CLayoutFile_LoadFromFile_t)getAddress(panoramaDll,"48 89 5C 24 08 55 56 57 41 54 41 55 41 56 41 57 48 8B EC 48 83 EC 60 48 8D 05 ?? ?? ?? ?? 48 C7 45 D0 ?? ?? 00 00 48"); // 48 C7 45 D0 xx xx = source line number
 	if(nullptr == g_Org_Panorama_CLayoutFile_LoadFromFile) {
 		return false;
 	}
@@ -2214,141 +2164,75 @@ void HookPanorama(HMODULE panoramaDll)
 	MirvPov_OnPanoramaDllLoaded(panoramaDll);
 };
 
+struct DeathMsgDetour {
+	PVOID * original;
+	PVOID replacement;
+};
+
+static bool InstallDeathMsgDetours(const char * name, const DeathMsgDetour * hooks, size_t count) {
+	LONG error = DetourTransactionBegin();
+	if(NO_ERROR == error) {
+		error = DetourUpdateThread(GetCurrentThread());
+		for(size_t i = 0; NO_ERROR == error && i < count; ++i) {
+			if(nullptr != *hooks[i].original)
+				error = DetourAttach(hooks[i].original, hooks[i].replacement);
+		}
+		if(NO_ERROR == error) error = DetourTransactionCommit();
+		else DetourTransactionAbort();
+	}
+	if(NO_ERROR != error)
+		advancedfx::Warning("AFXERROR: %s detour transaction failed: %ld.\n", name, error);
+	return NO_ERROR == error;
+}
+
 void HookDeathMsg(HMODULE clientDll) {
 	if (g_MirvDeathMsgGlobals.hooked) return;
 
-    MirvPovDeathPanel_ResolveAddresses(clientDll);
-    g_Original_getLocalSteamId = reinterpret_cast<g_Original_getLocalSteamId_t>(
-        MirvPovDeathPanel_ResolveEntityTokenAddress(clientDll));
-    if (nullptr == g_MirvPovDeathPanelState.originalHandlePlayerDeath) {
-        if (false) {
-            advancedfx::Warning(
-                "[mirv_pov_feedback] required player_death handler pattern missing; "
-                "no DeathMsg detour installed.\n");
-        }
-        return;
-    }
+	MirvPovDeathPanel_ResolveAddresses(clientDll);
+	g_Original_getLocalSteamId = reinterpret_cast<g_Original_getLocalSteamId_t>(
+		MirvPovDeathPanel_ResolveEntityTokenAddress(clientDll));
+	// Restore the upstream killfeed handler independently of the POV listener.
+	g_OriginalHudDeathNoticePlayerDeath = reinterpret_cast<HudDeathNoticePlayerDeath_t>(
+		getAddress(clientDll, "48 89 4c 24 08 55 53 41 54 41 55 41 56 48 8d ac 24 60 f7 ff ff"));
+	getPanoramaAddrsFromClient(clientDll);
 
-    bool panoramaAddrsReady = getPanoramaAddrsFromClient(clientDll);
-    if (false) {
-        advancedfx::Message(
-            "[mirv_pov_feedback] DeathMsg panorama addresses ready=%d\n",
-            panoramaAddrsReady ? 1 : 0);
-    }
-
-    LONG transactionBeginResult = DetourTransactionBegin();
-    LONG updateThreadResult = NO_ERROR;
-    LONG handlerAttachResult = NO_ERROR;
-    LONG tokenAttachResult = NO_ERROR;
-    LONG localPawnAttachResult = NO_ERROR;
-    LONG deathPanelHideAttachResult = NO_ERROR;
-    LONG deathPanelConstructorAttachResult = NO_ERROR;
-    LONG deathPanelDestructorAttachResult = NO_ERROR;
-    LONG deathMsgTransactionResult = -1;
-    const bool attachToken = nullptr != g_Original_getLocalSteamId;
-    const bool attachLocalPawn = nullptr != g_MirvPovDeathPanelState.originalGetLocalPawn;
-    const bool attachDeathPanelHide = nullptr != g_MirvPovDeathPanelState.hide;
-    const bool attachDeathPanelConstructor = nullptr != g_MirvPovDeathPanelState.originalConstructor;
-    const bool attachDeathPanelDestructor = nullptr != g_MirvPovDeathPanelState.originalDestructor;
-
-    if (NO_ERROR == transactionBeginResult) {
-        updateThreadResult = DetourUpdateThread(GetCurrentThread());
-    }
-
-    const bool transactionReady =
-        NO_ERROR == transactionBeginResult
-        && NO_ERROR == updateThreadResult;
-    if (transactionReady) {
-        handlerAttachResult = DetourAttach(
-            &(PVOID&)g_MirvPovDeathPanelState.originalHandlePlayerDeath,
-            handleDeathnotice);
-        if(attachDeathPanelConstructor) {
-            deathPanelConstructorAttachResult = DetourAttach(
-                &(PVOID&)g_MirvPovDeathPanelState.originalConstructor,
-                DeathPanel_Construct);
-        }
-        if(NO_ERROR == deathPanelConstructorAttachResult && attachDeathPanelDestructor) {
-            deathPanelDestructorAttachResult = DetourAttach(
-                &(PVOID&)g_MirvPovDeathPanelState.originalDestructor,
-                DeathPanel_Destruct);
-        }
-        if (attachToken) {
-            tokenAttachResult = DetourAttach(
-                &(PVOID&)g_Original_getLocalSteamId,
-                getLocalSteamId);
-        }
-		if(NO_ERROR == tokenAttachResult && attachLocalPawn) {
-			localPawnAttachResult = DetourAttach(
-				&(PVOID&)g_MirvPovDeathPanelState.originalGetLocalPawn,
-				DeathPanel_GetLocalPawn);
-		}
-		if (NO_ERROR == tokenAttachResult && NO_ERROR == localPawnAttachResult && attachDeathPanelHide) {
-			deathPanelHideAttachResult = DetourAttach(
-				&(PVOID&)g_MirvPovDeathPanelState.hide,
-				MirvPovDeathPanel_HideWhileAlive);
-		}
-
-        const bool allAttachSucceeded =
-            NO_ERROR == handlerAttachResult
-            && (!attachDeathPanelConstructor || NO_ERROR == deathPanelConstructorAttachResult)
-            && (!attachDeathPanelDestructor || NO_ERROR == deathPanelDestructorAttachResult)
-            && (!attachToken || NO_ERROR == tokenAttachResult)
-            && (!attachLocalPawn || NO_ERROR == localPawnAttachResult)
-            && (!attachDeathPanelHide || NO_ERROR == deathPanelHideAttachResult);
-        deathMsgTransactionResult = allAttachSucceeded
-            ? DetourTransactionCommit()
-            : DetourTransactionAbort();
-    } else if (NO_ERROR == transactionBeginResult) {
-        deathMsgTransactionResult = DetourTransactionAbort();
-    }
-
-	const bool deathMsgHookSucceeded =
-		transactionReady
-		&& NO_ERROR == handlerAttachResult
-		&& (!attachDeathPanelConstructor || NO_ERROR == deathPanelConstructorAttachResult)
-		&& (!attachDeathPanelDestructor || NO_ERROR == deathPanelDestructorAttachResult)
-		&& (!attachToken || NO_ERROR == tokenAttachResult)
-		&& (!attachLocalPawn || NO_ERROR == localPawnAttachResult)
-        && NO_ERROR == deathMsgTransactionResult;
-    if (!deathMsgHookSucceeded) {
-        if (false) {
-			advancedfx::Warning(
-					"[mirv_pov_feedback] DeathMsg detour failed begin=%ld update=%ld "
-						"handler=%ld constructor=%ld destructor=%ld token=%ld localPawn=%ld hide=%ld transaction=%ld.\n",
-				transactionBeginResult,
-				updateThreadResult,
-				handlerAttachResult,
-				deathPanelConstructorAttachResult,
-				deathPanelDestructorAttachResult,
-				tokenAttachResult,
-                localPawnAttachResult,
-                deathPanelHideAttachResult,
-                deathPanelConstructorAttachResult,
-                deathPanelDestructorAttachResult,
-                deathMsgTransactionResult);
-        }
-		return;
+	if(nullptr != g_OriginalHudDeathNoticePlayerDeath && nullptr != g_MirvPovHashString) {
+		const DeathMsgDetour hooks[] = {
+			{ &(PVOID&)g_OriginalHudDeathNoticePlayerDeath, (PVOID)HandleHudDeathNotice },
+			{ &(PVOID&)g_Original_getLocalSteamId, (PVOID)getLocalSteamId }
+		};
+		g_MirvDeathMsgGlobals.deathNoticeHooked = InstallDeathMsgDetours(
+			"HudDeathNotice", hooks, sizeof(hooks) / sizeof(hooks[0]));
+		g_MirvDeathMsgGlobals.localTokenHooked = g_MirvDeathMsgGlobals.deathNoticeHooked
+			&& nullptr != g_Original_getLocalSteamId;
+		if(nullptr == g_Original_getLocalSteamId)
+			advancedfx::Warning("AFXERROR: mirv_deathmsg localPlayer helper missing.\n");
+		if(!AFXADDR_GET(cs2_deathmsg_lifetime_offset) || !AFXADDR_GET(cs2_deathmsg_lifetimemod_offset))
+			advancedfx::Warning("AFXERROR: mirv_deathmsg lifetime offsets missing; lifetime overrides disabled.\n");
+	} else {
+		advancedfx::Warning("AFXERROR: HudDeathNotice handler or event hash missing; killfeed hook unavailable.\n");
 	}
 
-    g_MirvDeathMsgGlobals.deathNoticeHooked = true;
-    g_MirvDeathMsgGlobals.localTokenHooked = attachToken;
-	g_MirvPovDeathPanelState.localPawnHooked = attachLocalPawn;
-	g_MirvPovDeathPanelState.hideHooked = attachDeathPanelHide;
-	g_MirvPovDeathPanelState.constructorHooked = attachDeathPanelConstructor;
-	g_MirvPovDeathPanelState.destructorHooked = attachDeathPanelDestructor;
+	// A missing/failed DeathPanel detour must not roll back the killfeed hook.
+	if(nullptr != g_MirvPovDeathPanelState.originalHandlePlayerDeath) {
+		const DeathMsgDetour hooks[] = {
+			{ &(PVOID&)g_MirvPovDeathPanelState.originalHandlePlayerDeath, (PVOID)HandleHudDeathPanel },
+			{ &(PVOID&)g_MirvPovDeathPanelState.originalConstructor, (PVOID)DeathPanel_Construct },
+			{ &(PVOID&)g_MirvPovDeathPanelState.originalDestructor, (PVOID)DeathPanel_Destruct },
+			{ &(PVOID&)g_MirvPovDeathPanelState.originalGetLocalPawn, (PVOID)DeathPanel_GetLocalPawn },
+			{ &(PVOID&)g_MirvPovDeathPanelState.hide, (PVOID)MirvPovDeathPanel_HideWhileAlive }
+		};
+		if(InstallDeathMsgDetours("HudDeathPanel", hooks, sizeof(hooks) / sizeof(hooks[0]))) {
+			g_MirvPovDeathPanelState.localPawnHooked = nullptr != g_MirvPovDeathPanelState.originalGetLocalPawn;
+			g_MirvPovDeathPanelState.hideHooked = nullptr != g_MirvPovDeathPanelState.hide;
+			g_MirvPovDeathPanelState.constructorHooked = nullptr != g_MirvPovDeathPanelState.originalConstructor;
+			g_MirvPovDeathPanelState.destructorHooked = nullptr != g_MirvPovDeathPanelState.originalDestructor;
+		}
+	} else {
+		advancedfx::Warning("AFXERROR: HudDeathPanel listener missing; POV DeathPanel hook unavailable.\n");
+	}
+	// Address resolution must never overwrite a successfully installed trampoline.
 	g_MirvDeathMsgGlobals.hooked = true;
-    if (false) {
-        advancedfx::Message(
-					"[mirv_pov_feedback] DeathMsg hooks installed notice=%d token=%d localPawn=%d hide=%d "
-						"constructor=%d destructor=%d panorama=%d.\n",
-            g_MirvDeathMsgGlobals.deathNoticeHooked ? 1 : 0,
-            g_MirvDeathMsgGlobals.localTokenHooked ? 1 : 0,
-					g_MirvPovDeathPanelState.localPawnHooked ? 1 : 0,
-					g_MirvPovDeathPanelState.hideHooked ? 1 : 0,
-					g_MirvPovDeathPanelState.constructorHooked ? 1 : 0,
-					g_MirvPovDeathPanelState.destructorHooked ? 1 : 0,
-            panoramaAddrsReady ? 1 : 0);
-    }
 };
 
 void deathMsgId_PrintHelp_Console(const char * cmd)
