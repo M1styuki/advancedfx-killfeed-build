@@ -2193,7 +2193,7 @@ void HookDeathMsg(HMODULE clientDll) {
 		MirvPovDeathPanel_ResolveEntityTokenAddress(clientDll));
 	// Restore the upstream killfeed handler independently of the POV listener.
 	g_OriginalHudDeathNoticePlayerDeath = reinterpret_cast<HudDeathNoticePlayerDeath_t>(
-		getAddress(clientDll, "48 89 4c 24 08 55 53 41 54 41 55 41 56 48 8d ac 24 60 f7 ff ff"));
+		getAddress(clientDll, "48 89 4C 24 ?? 55 53 41 55 41 56 48 8D AC 24 ?? ?? ?? ?? 48 81 EC ?? ?? ?? ?? 48 8B 02"));
 	getPanoramaAddrsFromClient(clientDll);
 
 	if(nullptr != g_OriginalHudDeathNoticePlayerDeath && nullptr != g_MirvPovHashString) {
