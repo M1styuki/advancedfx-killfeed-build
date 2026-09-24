@@ -162,3 +162,21 @@ mirv_pov_debug_feature deafen 1   // 恢复，默认值为 1
 ### Validation and limits
 
 Static PE matching and disassembly were completed against the exact module hash above. The user runtime A/B test established only that the blue flash depends on the `feedback` feature. The corrected DLL still requires a Release x64 cloud build and a CS2 demo test with `feedback 1` to confirm the red result and check that other feedback remains intact. Future game updates require fresh signature and layout checks.
+
+
+## CS2 1.41.8.3: POV flash render call-site drift
+
+### Original game behavior
+
+- Analyzed module: `game/csgo/bin/win64/client.dll`, SHA-256 `12E4A7522678A582B085E404B7BFA32F9290F7FCD045716642DAA61C43E7C96F`; `steam.inf` PatchVersion `1.41.8.3`, SourceRevision `11030201`, PE timestamp `0x6AB44BED`, preferred image base `0x180000000`. RVAs and VAs below are static analysis locations, not loaded ASLR addresses.
+- Two native flash render sites call the same view predicate helper at RVA `0xCE0C80` (VA `0x180CE0C80`): compact call RVA `0x11C243B` (VA `0x1811C243B`) and per-view call RVA `0x11DA575` (VA `0x1811DA575`). Their return addresses are RVA `0x11C2440` and `0x11DA57A` respectively. The compact signature still matches once; the former per-view signature with frame offsets `B0 02 00 00` and `48 03 00 00` matches zero times. The current per-view bytes use `50 02 00 00` and `68 03 00 00`.
+- The native flash-duration network callback is at RVA `0xC8D4E0` (VA `0x180C8D4E0`). It reads the updated duration float from its third argument and, under a spectator/player condition, multiplies it by `0.5f` at RVA `0xC8D5DF` before storing the duration and end time in the pawn. This callback is not detoured by the present change. The adjacent `OnFlashMaxAlphaChanged` callback at RVA `0xC8D6C0` (VA `0x180C8D6C0`) changes opacity only; its current signature matches once. Thus `mirv_noflash` cannot restore full-white duration.
+
+### POV implementation
+
+- `AfxHookSource2/MirvPovHud.cpp` already has a scoped detour that returns false from the predicate only for these two render call sites while the POV HUD feature is active. The entire detour previously failed to install because it required both signatures to resolve and the obsolete per-view signature matched nothing. The change wildcards only the two compiler-generated frame displacements in the per-view signature. The replacement signature matches exactly once at RVA `0x11DA57A`; the existing code also verifies the preceding `E8` call and confirms both calls have the same target before installing the hook.
+- No new visible effect or command is introduced. `mirv_noflash` still adjusts maximum flash opacity, and the existing scoped POV render override retains its HUD-feature gate.
+
+### Validation and remaining uncertainty
+
+Static signature scans and call-target calculations were made against the exact module hash above. The user's current build showed the short, translucent flash only with `mirv_pov 1`; changing `mirv_noflash` did not fix it. This is consistent with the missing render detour but does not prove it is the only factor. Windows Release x64 compilation and a same-demo POV-on/off runtime comparison are still required. The native half-duration branch may independently shorten the flash; change that callback only after confirming the render fix leaves a duration mismatch and defining the correct per-target conditions. Future client builds require a fresh match and control-flow check.
