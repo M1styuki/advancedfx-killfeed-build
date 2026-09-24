@@ -612,9 +612,12 @@ static bool MirvPovHud_ResolveFlashContexts(HMODULE clientDll) {
     const size_t compactPathMatch = getAddress(
         clientDll,
         "48 8B F2 48 8B E9 E8 ?? ?? ?? ?? 84 C0 0F 85");
+    // The two stack-frame displacements change with CS2 compiler updates.
+    // Resolve the call site, then require the same predicate target as the
+    // compact path before installing either scoped return-address override.
     const size_t perViewPathMatch = getAddress(
         clientDll,
-        "84 C0 74 4C 8B 85 B0 02 00 00 49 8D 8D 48 03 00 00");
+        "84 C0 74 4C 8B 85 ?? ?? ?? ?? 49 8D 8D ?? ?? ?? ??");
     if(0 == compactPathMatch || 0 == perViewPathMatch) {
         MIRV_POV_DIAGNOSTIC_WARNING("[mirv_pov_flash] Flash render contexts were not found.\n");
         return false;
