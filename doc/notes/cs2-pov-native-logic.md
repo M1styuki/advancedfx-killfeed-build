@@ -142,3 +142,23 @@ mirv_pov_debug_feature deafen 1   // 恢复，默认值为 1
 - 前两次脚本断言失败是跳转后继续播放，启用时已越过冻结期；不能算冻结期功能失败。最终使用 `demo_timescale 0` 固定跳转目标，录制正常过渡时恢复 1，并检查日志实际目标 tick。
 
 静态分析已证明旧 visibility 路径绕过原生动画；本次实测证明上述短跳转和开关场景下的新实现正确。没有取得用户最初出错的具体 demo/tick，也未对旧 DLL 做同片段 A/B，所以“短 seek 遗留 CSS 类”仍是工作解释，不能把它写成已复现的唯一根因。未覆盖所有游戏模式、死亡视角、任意 demo 或游戏更新后的 ABI；未知 schema 恢复原生 CSS，不猜偏移。
+
+
+## CS2 1.41.8.3 (2026-09-23 build): POV hurt-fade color layout
+
+### Game behavior and evidence
+
+- Module: `game/csgo/bin/win64/client.dll`, SHA-256 `12E4A7522678A582B085E404B7BFA32F9290F7FCD045716642DAA61C43E7C96F`; PE timestamp `0x6AB44BED`, preferred image base `0x180000000`. These are analysis addresses, not loaded ASLR addresses.
+- `CViewEffects::Get(-1)` resolves the active view-effects object at RVA `0xC0C591` (analysis VA `0x180C0C591`); its existing signature matched once in executable sections. The native `CUserMessageFade` callback at RVA `0xC1DD50` (VA `0x180C1DD50`) reads the message color from `message + 0x54` and passes a 12-byte fade payload to the view-effects queue. The getter and callback signatures each matched once.
+- `CViewEffects::AddFade` is a native helper called through vtable slot 6, at RVA `0xC097B0` (VA `0x180C097B0`), not a detoured function. Its current disassembly reads duration at payload `+0`, hold at `+2`, flags at `+4`, and the 32-bit color at `+8` (`mov eax, dword ptr [r14 + 8]` at RVA `0xC09959`), storing it at fade entry `+0xC`. Color alpha is subsequently read from entry `+0xF`.
+- On an actual local `player_hurt`, the game can produce a native red Fade message. The POV spectator path cannot rely on that real-local message for the watched player. The code therefore queues one synthetic hurt fade on `player_hurt`, using a learned native template if observed or a short red fallback otherwise. The watched-player event is filtered through `MirvPovFeedback_IsLocalPlayerVictim`; the queue is processed on the render thread.
+
+### POV implementation and fix
+
+- Before this change, `NativeFade_Apply` in `AfxHookSource2/RenderSystemDX11Hooks.cpp` sent a packed 10-byte payload, putting `rgba` at `+6`. The native helper reads `+8`, so it consumed the last two color bytes plus unrelated stack bytes. This explains the blue/purple screen when `mirv_pov 1` and `feedback` were active. The user reproduced that disabling `mirv_pov_debug_feature feedback` removed the blue flash; that coarse switch also suppresses the synthetic fade and other feedback effects.
+- The payload now retains two zeroed bytes after flags, puts `rgba` at `+8`, and asserts a 12-byte native layout at compile time. Existing fade timing, learned-template path, death-black fade, and independent feedback controls remain as before. No new visible effect or command is introduced.
+- `AfxHookSource2/DeathMsg.cpp` also adopts the current upstream `HudDeathNotice` handler signature. On this module the old signature matched zero times; the updated signature matched once at RVA `0xE821A0` (VA `0x180E821A0`). The independent killfeed and DeathPanel handlers remain separate.
+
+### Validation and limits
+
+Static PE matching and disassembly were completed against the exact module hash above. The user runtime A/B test established only that the blue flash depends on the `feedback` feature. The corrected DLL still requires a Release x64 cloud build and a CS2 demo test with `feedback 1` to confirm the red result and check that other feedback remains intact. Future game updates require fresh signature and layout checks.
