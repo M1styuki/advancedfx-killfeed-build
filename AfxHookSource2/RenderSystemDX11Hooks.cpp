@@ -54,6 +54,7 @@
 #include <thread>
 #include <functional>
 #include <cstdint>
+#include <cstddef>
 
 #include <dxgi.h>
 #include <dxgi1_4.h>
@@ -268,17 +269,18 @@ bool NativeFade_Apply(
     }
 
 
-    // CViewEffects::AddFade consumes a compact 10-byte payload. Passing a
-    // fabricated CUserMessageFade_t here bypasses the native Fade queue and
-    // was the reason the red alpha and death timing diverged from the game.
-#pragma pack(push, 1)
+    // CViewEffects::AddFade reads the color at payload +8, after two
+    // alignment bytes following the flags. A packed 10-byte payload shifted
+    // the red and alpha channels and produced a blue/purple hurt flash.
     struct FadePayload {
         uint16_t duration;
         uint16_t hold;
         uint16_t flags;
+        uint16_t padding;
         uint32_t rgba;
-    } payload{ duration, hold, flags, rgba };
-#pragma pack(pop)
+    } payload{ duration, hold, flags, 0, rgba };
+    static_assert(offsetof(FadePayload, rgba) == 8, "Native fade color offset changed");
+    static_assert(sizeof(FadePayload) == 12, "Native fade payload size changed");
 
     const char * previousFadeApplySource = g_NativeFadeApplySource;
     g_NativeFadeApplySource = source;
