@@ -2,6 +2,7 @@
 #include "AfxBuildInfo.h"
 #include "ClientEntitySystem.h"
 #include "MirvPovCore.h"
+#include "MirvPovHud.h"
 #include "MirvPovBuyMenu.h"
 #include "MirvPovKillReward.h"
 #include "MirvPovRadar.h"
@@ -229,6 +230,11 @@ CON_COMMAND(mirv_pov_teamid_debug, "Enable rate-limited mirv_pov TeamID diagnost
     }
 
     advancedfx::Message("Usage: mirv_pov_teamid_debug <0|1>\n");
+}
+
+CON_COMMAND(mirv_pov_flash_status, "Print flash hook usage and current POV pawn flash state.")
+{
+    MirvPovHud_PrintFlashStatus();
 }
 
 CON_COMMAND(mirv_pov_debug_feature, "Configure a mirv_pov feature. deafen applies immediately; other features apply on the next enable cycle.")

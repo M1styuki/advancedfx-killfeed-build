@@ -4,6 +4,7 @@
 
 void MirvPovHud_ApplyPatches(HMODULE clientDll);
 void MirvPovHud_RemovePatches();
+void MirvPovHud_PrintFlashStatus();
 void MirvPovHud_OnPanoramaDllLoaded(HMODULE panoramaDll);
 void MirvPovHud_OnLevelInitPreEntity();
 void MirvPovHud_ReapplyPanelState();
