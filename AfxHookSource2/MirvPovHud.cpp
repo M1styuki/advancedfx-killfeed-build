@@ -5,6 +5,7 @@
 #include "ClientEntitySystem.h"
 #include "MirvPanorama.h"
 #include "MirvPovCore.h"
+#include "MirvTime.h"
 #include "Globals.h"
 #include "SchemaSystem.h"
 
@@ -15,6 +16,7 @@
 #include "../deps/release/Detours/src/detours.h"
 
 #include <stdint.h>
+#include <atomic>
 #include <intrin.h>
 #include <string.h>
 
@@ -537,6 +539,12 @@ static FlashViewPredicate_t g_OrgFlashViewPredicate = nullptr;
 static bool g_bFlashViewPredicateHooked = false;
 static void * g_FlashViewPredicateReturnAddresses[2] = {};
 static bool g_FlashHooksActive = false;
+static int g_FlashHookStatus = 0; // 0 not attempted, 1 context missing, 2 target mismatch, 3 detour failed, 4 installed.
+static std::atomic<unsigned long long> g_FlashCompactCalls{0};
+static std::atomic<unsigned long long> g_FlashPerViewCalls{0};
+static std::atomic<unsigned long long> g_FlashOtherCalls{0};
+static std::atomic<unsigned long long> g_FlashCompactOriginalTrue{0};
+static std::atomic<unsigned long long> g_FlashPerViewOriginalTrue{0};
 
 static uint8_t * MirvPovHud_GetRelativeCallTarget(uint8_t * callSite) {
     if(nullptr == callSite || 0xE8 != callSite[0]) return nullptr;
@@ -602,6 +610,16 @@ static bool __fastcall New_FlashViewPredicate() {
     bool result = g_OrgFlashViewPredicate();
     MirvPov_PopHookReturnAddress(previousReturnAddress);
 
+    if(returnAddress == g_FlashViewPredicateReturnAddresses[0]) {
+        g_FlashCompactCalls.fetch_add(1, std::memory_order_relaxed);
+        if(result) g_FlashCompactOriginalTrue.fetch_add(1, std::memory_order_relaxed);
+    } else if(returnAddress == g_FlashViewPredicateReturnAddresses[1]) {
+        g_FlashPerViewCalls.fetch_add(1, std::memory_order_relaxed);
+        if(result) g_FlashPerViewOriginalTrue.fetch_add(1, std::memory_order_relaxed);
+    } else {
+        g_FlashOtherCalls.fetch_add(1, std::memory_order_relaxed);
+    }
+
     if(!g_FlashHooksActive || !MIRV_POV_FEATURE_ACTIVE("hud")) return result;
     if(returnAddress == g_FlashViewPredicateReturnAddresses[0]
         || returnAddress == g_FlashViewPredicateReturnAddresses[1]) return false;
@@ -619,6 +637,7 @@ static bool MirvPovHud_ResolveFlashContexts(HMODULE clientDll) {
         clientDll,
         "84 C0 74 4C 8B 85 ?? ?? ?? ?? 49 8D 8D ?? ?? ?? ??");
     if(0 == compactPathMatch || 0 == perViewPathMatch) {
+        g_FlashHookStatus = 1;
         MIRV_POV_DIAGNOSTIC_WARNING("[mirv_pov_flash] Flash render contexts were not found.\n");
         return false;
     }
@@ -628,6 +647,7 @@ static bool MirvPovHud_ResolveFlashContexts(HMODULE clientDll) {
     uint8_t * compactPredicateTarget = MirvPovHud_GetRelativeCallTarget(compactPredicateCall);
     uint8_t * perViewPredicateTarget = MirvPovHud_GetRelativeCallTarget(perViewPredicateCall);
     if(nullptr == compactPredicateTarget || compactPredicateTarget != perViewPredicateTarget) {
+        g_FlashHookStatus = 2;
         MIRV_POV_DIAGNOSTIC_WARNING("[mirv_pov_flash] Flash view predicate validation failed.\n");
         return false;
     }
@@ -646,13 +666,49 @@ static bool MirvPovHud_InstallFlashPredicateHook(HMODULE clientDll) {
     DetourUpdateThread(GetCurrentThread());
     DetourAttach(&(PVOID &)g_OrgFlashViewPredicate, New_FlashViewPredicate);
     if(NO_ERROR != DetourTransactionCommit()) {
+        g_FlashHookStatus = 3;
         g_OrgFlashViewPredicate = nullptr;
         MIRV_POV_DIAGNOSTIC_WARNING("[mirv_pov_flash] Flash view predicate Detour failed.\n");
         return false;
     }
 
     g_bFlashViewPredicateHooked = true;
+    g_FlashHookStatus = 4;
     return true;
+}
+
+void MirvPovHud_PrintFlashStatus() {
+    advancedfx::Message(
+        "[mirv_pov_flash] hook=%d active=%d pov=%d hud=%d calls compact=%llu (native true=%llu), perView=%llu (native true=%llu), other=%llu.\n",
+        g_FlashHookStatus,
+        g_FlashHooksActive ? 1 : 0,
+        MirvPov_IsEnabled() ? 1 : 0,
+        MirvPovDebug_IsFeatureEnabled("hud") ? 1 : 0,
+        g_FlashCompactCalls.load(std::memory_order_relaxed),
+        g_FlashCompactOriginalTrue.load(std::memory_order_relaxed),
+        g_FlashPerViewCalls.load(std::memory_order_relaxed),
+        g_FlashPerViewOriginalTrue.load(std::memory_order_relaxed),
+        g_FlashOtherCalls.load(std::memory_order_relaxed));
+
+    CEntityInstance * pawn = GetCurrentPovPlayerPawn();
+    if(nullptr == pawn) {
+        advancedfx::Message("[mirv_pov_flash] POV pawn=null.\n");
+        return;
+    }
+    __try {
+        const unsigned char * data = reinterpret_cast<const unsigned char *>(pawn);
+        const float bangTime = *reinterpret_cast<const float *>(data + 0x14FC);
+        const float screenshotAlpha = *reinterpret_cast<const float *>(data + 0x1500);
+        const float overlayAlpha = *reinterpret_cast<const float *>(data + 0x1504);
+        const unsigned int flags = *reinterpret_cast<const unsigned int *>(data + 0x1508);
+        const float maxAlpha = *reinterpret_cast<const float *>(data + 0x150C);
+        const float duration = *reinterpret_cast<const float *>(data + 0x1510);
+        advancedfx::Message(
+            "[mirv_pov_flash] pawn=%p time=%.3f bangTime=%.3f duration=%.3f screenshotAlpha=%.3f overlayAlpha=%.3f maxAlpha=%.3f flags=0x%08X.\n",
+            pawn, g_MirvTime.curtime_get(), bangTime, duration, screenshotAlpha, overlayAlpha, maxAlpha, flags);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        advancedfx::Warning("[mirv_pov_flash] Could not read POV pawn flash fields.\n");
+    }
 }
 
 void MirvPovHud_ApplyPatches(HMODULE clientDll) {
