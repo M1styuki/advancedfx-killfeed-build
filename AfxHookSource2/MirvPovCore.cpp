@@ -53,6 +53,8 @@ MirvPovDebugFeatureState g_MirvPovDebugFeatures[] = {
     {"hud", true, true},
     {"teamhealth", true, true},
     {"buymenu", true, true},
+	{"buymenu_promo_hide", true, true, true},
+	{"buymenu_layout", true, true, true},
     {"radar", true, true},
     {"voice", true, true},
     {"scoreboard", true, true},

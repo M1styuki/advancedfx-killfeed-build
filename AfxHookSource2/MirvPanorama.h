@@ -13,3 +13,4 @@ bool Panorama_SetPanelClass(void* panel, const char* className, bool value);
 bool Panorama_HasPanelClass(void* panel, const char* className);
 bool Panorama_SetPanelOpacity(void* panel, float value);
 bool Panorama_SetPanelVisible(void* panel, bool value);
+bool Panorama_SetPanelX(void* panel, float value);

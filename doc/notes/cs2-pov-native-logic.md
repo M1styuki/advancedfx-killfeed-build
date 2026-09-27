@@ -423,3 +423,192 @@ fork 已移除该函数及其 `g_Original_handlePlayerDeath` 全局入口，改�
 唯一冲突在 `SceneSystem.cpp::new_InitDrawingData` 的旧 PostProcessing command-list 路径。按上游删除该跟踪和额外回调代码，将 commit hook 安装留在 scene filter 有效分支；五参数调用及可选 name suffix 转发仍保留。SceneSystem 与上游最终内容仅有一处尾随空白清理差异，POV 受击/死亡效果改动不被回退。此次没有新增二进制逆向或地址核验结论。
 
 Release x64 AfxHookSource2 构建成功（`diagnostics/hurt-death-native-20260924/build-upstream-21924.log`），合并无未解决冲突，diff whitespace 检查通过。未运行游戏或测试、未替换安装 DLL；旧队友声音调查及本地分析产物继续不纳入本次提交。
+
+## 2026-09-26：CS2 1.41.8.5 后续构建的 POV 购买菜单适配
+
+**2026-09-27 提交整理时的最终状态：** 用户已实机确认购买菜单正常呼出、PROMOTED Knife 隐藏、菜单与人物间距及鼠标经过后的显示正常。当前实际采用样式按需初始化与既有 -116 x 布局修正；该偏移是经本次用户画面确认有效的兼容处理，不声称已还原所有分辨率下的原生 live 布局。后续投掷物置灰现象由用户反馈自行恢复，期间没有修改行为代码或安装新 DLL，不能计为本次修复成果，也未确定其原因。下面保留历次调查、撤回和验证记录，早期“待验证”描述仅对应当时阶段。独立开关 off/on/re-enable 的完整实机矩阵仍未执行，不因最终画面正常而补写为通过。
+
+### 构建身份与证据边界
+
+- 当前安装 `client.dll` SHA-256 为 `9b4f46dbd6a433163b39d7ea0123c321b1ad6d95ceedd40ae121312464833549`，image base `0x180000000`，image size `0x2998000`。不得把本节地址用于其他哈希。
+- 按该完整哈希建立独立 IDA 数据库 `.codex/client-dll-analysis/9b4f46dbd6a43316/client.i64`；基线识别 106969 个函数、66396 个字符串。`idalib_open` 与 `idb_save` 的前台调用均在 300 秒超时，但 worker 最终完成分析，warmup/survey 成功，保存文件存在且 finalize 成功；不能把前台超时写成分析失败或把保存成功外推为语义验证。
+- 迁移以此前已核验的 `40bce8206f51b92ee05d6121c6e42c717bf3fa0cc0edeeb6698744b1c4799feb` 为 OLD。`diagnostics/pov-update-20260926/map_buymenu_current.py` 对 PE unwind 函数边界、RIP 相对引用及归一化指令做定向比较。相似度只用于定位；关键入口另核对原始指令、RIP 目标、schema descriptor 和调用用途。
+
+### 游戏原生行为与地址
+
+原生 `CCSGO_BuyMenu` 仍按 open → refresh/full refresh → hover/think → model/select → close 顺序工作；local pawn/controller getter、loadout、购买资格、买入/卖出、模型预览和 buy-menu bit writer 的 ABI 与上一构建保持。原生 open-event creator 仍分配 0x20 字节事件对象、写入事件 symbol、通过 UI engine weak handle 解析面板；本构建只是被链接到远离其余 BuyMenu 函数的新位置。原生路径与 POV 接入分开如下；analysis VA = image base + RVA。
+
+| 用途 | RVA | analysis VA | 接入 |
+| --- | --- | --- | --- |
+| open / close | `0xDB73D0 / 0xD9FFF0` | `0x180DB73D0 / 0x180D9FFF0` | detour |
+| refresh / full refresh | `0xDBAEC0 / 0xDBAF60` | `0x180DBAEC0 / 0x180DBAF60` | detour |
+| hover / think | `0xDC2460 / 0xDA8B70` | `0x180DC2460 / 0x180DA8B70` | detour |
+| local pawn / controller | `0x96B2A0 / 0x96B260` | `0x18096B2A0 / 0x18096B260` | 仅在 BuyMenu scope detour |
+| loadout / hover loadout | `0x904AF0 / 0x904A50` | `0x180904AF0 / 0x180904A50` | 仅在 scope detour |
+| write buy-menu bit | `0xC94CD0` | `0x180C94CD0` | detour，POV active 时阻止写回 |
+| purchase / sell | `0xDA9A80 / 0xDA9DC0` | `0x180DA9A80 / 0x180DA9DC0` | detour，POV active 时抑制 |
+| model / select / SetPlayerModel | `0xDC0D10 / 0xDB6A80 / 0xE5C5A0` | `0x180DC0D10 / 0x180DB6A80 / 0x180E5C5A0` | detour |
+| EventOpenBuyMenu creator | `0xDB1E10` | `0x180DB1E10` | 未 hook，仅调用 |
+| symbol / item lookup / pawn model | `0x1781C90 / 0x1131320 / 0x21C150` | `0x181781C90 / 0x181131320 / 0x18021C150` | 未 hook，仅调用 |
+| inventory manager / default loadout | `0x83A6C0 / 0x83D270` | `0x18083A6C0 / 0x18083D270` | 未 hook，仅调用 |
+| acquire / owned weapon | `0x8C16F0 / 0x8FFA80` | `0x1808C16F0 / 0x1808FFA80` | 状态诊断 helper，未 hook |
+
+当前 open-event creator `0x180DB1E10` 与旧 `0x180DAF500` 的 ABI 和逐指令结构一致；其 UI engine RIP load 指向 RVA `0x272E7E0`（analysis VA `0x18272E7E0`）。UI engine weak-handle getter/resolver/dispatch vtable slots仍为 33/34/47，panel visible getter slot 34，UI HasClass/SetClass slots 157/160。cant-afford / cant-buy symbol 经旧引用函数 `0xDAB1B0` → 新 `0xDADA60` 的相同指令索引映射为 RVA `0x25C2F74 / 0x25C2F78`。
+
+schema 字符串 `m_bIsBuyMenuOpen` 位于 RVA `0x1C812F8`，descriptor RVA `0x2234D40` 明确记录字段偏移 `0x15EA`；运行时仍以 `SchemaSystem` 的类限定动态解析为准。controller inventory `+0x820`、pawn weapon/item services `+0x12F0/+0x12F8`、inventory `+0x88/+0x90` 与 56-byte records、panel/preview 和五组 88-byte 菜单记录等立即数均在对应原生函数的归一化指令中保持。购买资格函数仅 RIP jump-table 目标随布局变化，实际分支指令与立即数保持。
+
+### POV 实现、控制与清理
+
+`AfxHookSource2/MirvPovBuyMenu.cpp` 的完整 SHA-256 门控、image 上界、UI globals、全部 detour/helper RVA 更新至本节构建；未知 hash 或运行时 `m_bIsBuyMenuOpen != 0x15EA` 时仍拒绝安装。状态输出不再另读硬编码字段，改用动态 schema 偏移。POV 仍只在其线程局部 scope 替换被观察 pawn/controller/loadout/model，阻止真实购买、出售及网络 buy bit 写回；原生 helper 与未挂钩调用点不被描述成 hook。
+
+继续沿用 `mirv_pov_debug_feature buymenu 0|1`（Release 可用、默认开启模块）及用户级 `mirv_pov_buymenu 0|1`（默认关闭）两层控制。关闭 BuyMenu 或主 POV 时同步执行原生 close、恢复 `hud-colorize-wash` class、清除 pending/handle/panel/target；本次没有新增用户可见效果，故不新增独立 feature 名称。不同效果的开关不互相关闭。
+
+### 验证与剩余不确定性
+
+本节第一轮静态验证覆盖完整 hash、schema offset、image size、24 个函数/helper、UI engine 与两个 class symbol，但仅按函数形状迁移 creator，未核对事件注册字符串和 symbol 身份；这使第一版错误地选择了同形的 `0x10933C0`。Release x64 `AfxHookSource2` 构建成功，`git diff --check` 通过；第一版输出 DLL SHA-256 为 `70D612D27CF35D3117B3DA03543BFBC666617C91367C8742410B2F633F8FD95B`。`mirv_pov 1` 后单独出现的 `undefined` 不来自 `MirvCommands.cpp` 的 POV 命令输出；仓库中的 JavaScript loader/evaluator 会把无返回值结果转成字符串打印，通常是同批 `mirv_script_load` / `mirv_script_exec` 的异步结果，对本次 BuyMenu build gate 无因果关系。
+
+后续用户明确授权安装。确认 CS2 未运行、HLAE 启动器未加载目标 DLL后，将旧安装文件备份为 `AfxHookSource2.dll.backup-20260926-191636`，再替换 `D:\Edu\Python\CS_AutoHighlight\tools\hlae\x64\AfxHookSource2.dll`。安装文件与构建产物 SHA-256 均为 `70D612D27CF35D3117B3DA03543BFBC666617C91367C8742410B2F633F8FD95B`；备份哈希为 `8B23F98BCA1E4ACD7E7F765EF756DB48F4FF6BFA573D62F90FCCB3B8AE0D3E71`。未启动或重启 CS2/HLAE，运行验证范围仍不变。
+
+### 首次用户运行反馈：尚未进入 open dispatch
+
+用户随后自行启动 `inferno_test.dem` 验证。`console.log` 记录 `[mirv_pov_buymenu] native simulation hooks installed.`，证明完整 hash/schema 门控和 Detours transaction 已通过；`mirv_pov_buymenu enabled` 后两次状态均为 `hooks=1 active=0 wanted=0 pending=0 visible=0 opens=0`，没有出现 `opened for ...` 或 `closed`。因此本次失败发生在 open event dispatch 之前，不能据此把 `0x10933C0` event creator 或原生 open handler 判为失效。
+
+第二次状态位于暂停的 game tick 17645：全体实体扫描仅发现 `player=7 name=我颠颠又刀刀 open=1 team=2`，其他玩家 open=0。该逐实体扫描不表示当前观察目标就是 player 7；BuyMenu 的实际 gate 另取 `GetCurrentPovPlayerPawn/Controller`，并同时要求 pawn/controller 有效、当前 pawn health>0、当前 pawn 的 open bit 非零。旧版已通过的对照日志明确在 `spec_player 2` 后为当前目标输出 `opened for 狗子doggest` 及 `active=1 wanted=1 visible=1`，暂停 demo 本身不阻止打开；切到 open=0 的 player 9 后则回到 active/wanted=0。
+
+本次日志没有记录当前 observer target、当前 pawn health 或 target controller，因此只能将原因界定为“当前 POV 选择/gate 未满足”，不能断言 player 7 的 open bit 已被当前 POV 使用。最小复核是在同一 tick 明确执行 `spec_player 7`，等待 marker 后查询 `mirv_pov_buymenu_status`；若仍为 active=0，再增加只读状态输出记录 current pawn/controller/name/health/open 与 observer handle，而不是继续猜测并修改已静态核验的 native RVA。CS2 在日志采集后已退出；代理未启动、重启或控制游戏。
+
+为消除全玩家扫描与当前 POV 目标之间的歧义，`mirv_pov_buymenu_status` 随后增加只读的 `current_target` 行：pawn/controller 地址、玩家名、health、team、`m_bIsBuyMenuOpen`、pawn/controller handle。该诊断不改变模拟条件或 UI 状态，用于下一轮直接区分“观察目标解析失败”“目标未存活”和“目标 buy-menu bit 为 0”。
+
+该诊断版 Release x64 构建成功，DLL SHA-256 为 `5C79B755EC09B69A73F729B3E4A8B40F19015D67B381109A8F54C7E65FD07659`。用户明确授权安装后，确认 CS2 未运行，将上一版备份为 `AfxHookSource2.dll.backup-20260926-204148`（SHA-256 `70D612D27CF35D3117B3DA03543BFBC666617C91367C8742410B2F633F8FD95B`），再替换 HLAE x64 安装目录中的 DLL；安装文件与构建产物哈希一致。未启动或重启 CS2/HLAE，仍待用户运行 `mirv_pov_buymenu_status` 采集 `current_target`。
+
+### `pending=1` 的 creator 身份纠正
+
+用户运行诊断版后，状态为 `active=1 wanted=1 pending=1 visible=0 opens=0`；`current_target` 明确是存活的 player 7，health 100、team 2、`m_bIsBuyMenuOpen=1`。这证明 POV 目标和 gate 均正确，失败发生在事件提交到原生 open handler 之间。
+
+重新从当前 DLL 的事件注册字符串核验身份后确认：`EventOpenBuyMenu` 字符串 VA `0x181CB22B8` 的唯一代码引用位于 `0x1800FE2D5`，注册函数 `0x1800FE2C0` 把 creator `0x180DB1E10` 和事件 symbol `word_18223D68C` 交给注册例程。`0x180DB1E10` 分配 0x20-byte `CUIEvent<0>`、写入该 symbol，并通过 `qword_18272E7E0` 的 vtable `+0x108` 解析 panel weak handle；其 ABI 与旧构建已验证的 `0x180DAF500` 一致。
+
+第一轮错误选择的 `0x1810933C0` 则由 `0x180113840` 注册为 `PanoramaComponent_MyPersona_RecurringSubscriptionStatusChange`，使用不同的事件 symbol `word_18224C4C4`。它与真正 creator 具有相同分配大小、vtable 和 weak-handle 结构，因此单纯归一化函数体产生了错误匹配。UI dispatch 的 vtable `+0x178`（slot 47）另有当前构建原生调用点 `0x1801513BE`、`0x180151660` 支持，保持不变。POV 实现据此将未 hook helper 调用从 RVA `0x10933C0` 改为 `0xDB1E10`；仍需重新构建、安装并运行验证 open/close、可见性、loadout 和 preview。
+
+修正 creator 后的 Release x64 构建成功，DLL SHA-256 为 `14D09D8C456B0CCF41D373B15BEC451CB935E709C0927BB1F1D46D7BED14CE5B`，`git diff --check` 通过。该产物尚未安装或运行；因此静态根因已确认，但实际菜单恢复仍待授权替换 DLL 后验证。
+
+用户随后明确授权安装。确认 CS2 未运行后，将诊断版备份为 `AfxHookSource2.dll.backup-20260926-creator-fix`（SHA-256 `5C79B755EC09B69A73F729B3E4A8B40F19015D67B381109A8F54C7E65FD07659`），再替换 HLAE x64 安装目录中的 DLL；安装文件与修正版构建产物 SHA-256 均为 `14D09D8C456B0CCF41D373B15BEC451CB935E709C0927BB1F1D46D7BED14CE5B`。未启动或重启 CS2/HLAE，实机行为仍待用户验证。
+
+### promotion 商品与菜单/人物间距
+
+用户实机确认修正 creator 后 BuyMenu 可以正常打开，但 1920x1080 画面存在两个彼此独立的问题：左下多出竞技模式正常游玩不显示的 `PROMOTED Knife`；五列购物菜单整体偏右，其右缘与人物 preview 重合。当前 client 中 `CCSGO_BuyMenu` 构造函数 RVA `0xD98740` 加载 `file://{resources}/layout/buymenu.xml`；五列绑定函数 RVA `0xDA08E0` 查找 `CategoryContainer1..5`，preview/item 绑定函数 RVA `0xDA3860` 查找 `promo-item`、`BuyButton`、`loadout_pos` 和 `SellbackButton`。这些原生函数没有写入购买网格或 preview 的 x/y/width/transform，布局由 Panorama XML/CSS 决定。
+
+promotion 修复独立处理：资源树确认 `CategoryContainerPromo -> promo-item` 是五个普通分类之外的容器，POV 实现通过 `MirvPanorama_FindChildInLayoutFile` 定位它，使用 Panorama `visibility` style property 在菜单打开/刷新期间将其 collapse，并在 close、reset、seek、目标切换或主 POV 关闭时恢复 visible，不删除节点、不修改真实购买逻辑。独立 Release 控制为 `mirv_pov_debug_feature buymenu_promo_hide 0|1`，默认 `1`，即时生效且只控制 promo；设为 `0` 恢复该商品。
+
+布局修复来自独立的像素基线比较。旧 1280x720 正常图中购物菜单约为 x=168..803；按相同 16:9 比例缩放到 1920x1080，预期约为 x=252..1205。用户图中实际约为 x=426..1378，故菜单整体比基线向右偏约 174 个屏幕像素，即 1.5 倍 UI scale 下的 116 Panorama px。人物头部和身体锚点与旧图按 1.5 倍缩放后的坐标一致，因此人物不应移动。实现递归定位 `.buymenu-left`，仅对该购物列设置 `x: -116px`，不修改 `id-buymenu-agent` preview。
+
+当前 `panorama.dll` SHA-256 为 `fc3cd563995130dd88a0c92b15deca26bd0fb5504b96483ab98bb243ca7f091d`，image base `0x180000000`。IDA 中 `panorama::CStylePropertyPosition` vtable 为 VA `0x1804D7DF8`；parse VA `0x18017F320`、clone VA `0x18017F2E0`。对象为 40 bytes：公共头 `+0x00..+0x0F`，x/y/z 三个 `{float value; uint32 unit}` 分别位于 `+0x10/+0x18/+0x20`；pixel unit 为 1。实现按 RTTI 动态查找 vtable、按 symbol resolver 获取 `x` ID，不把该 VA 硬编码到运行时。独立 Release 控制为 `mirv_pov_debug_feature buymenu_layout 0|1`，默认 `1`，即时生效；设为 `0` 将 `.buymenu-left` 的 x 恢复为 0。close、reset、seek、目标切换和主 POV 关闭也恢复为 0。该控制不影响 promotion、人物模型或其他 BuyMenu 样式。
+
+仍需实机分别验证：`buymenu_promo_hide` 默认隐藏、off/on/re-enable；`buymenu_layout` 的默认间距、off/on/re-enable；两个开关互不影响；以及主 POV 关闭后的状态恢复。
+
+Release x64 构建成功，`git diff --check` 通过，产物 SHA-256 为 `435AF2688FE40F865CE05307823A3984E0284D20736F79915541C3E22285D8F8`。依用户的持续部署偏好，确认 CS2 未运行后备份上一版为 `AfxHookSource2.dll.backup-20260926-213048`（SHA-256 `14D09D8C456B0CCF41D373B15BEC451CB935E709C0927BB1F1D46D7BED14CE5B`），并安装新 DLL；安装文件与构建产物哈希一致。未启动或重启 CS2/HLAE。
+
+分离 promotion 与布局修复后的 Release x64 构建成功，`git diff --check` 通过，产物 SHA-256 为 `3022F237F9482DFB0C18C0C1F6C1F28364CB0D80DD75C1FA7B939D58F0A54F82`。确认 CS2 未运行后，将上一版备份为 `AfxHookSource2.dll.backup-20260926-2206`（SHA-256 `435AF2688FE40F865CE05307823A3984E0284D20736F79915541C3E22285D8F8`），并安装新 DLL；安装文件与构建产物哈希一致。未启动或重启 CS2/HLAE。
+
+用户实机反馈该版 `PROMOTED Knife` 仍可见，且鼠标移入菜单后购买列会回到中间。复核原生基线：1280x720 下菜单外框约 `x=168..803`、五列约 `x=178..792`；CT/T 人物主体约 `x=831..1095`，脚底 `y≈658..659`。同比到 1920x1080，菜单应约 `x=252..1205`、五列约 `x=267..1188`，人物主体约 `x=1247..1643`。用户图中的人物锚点符合同比位置，菜单则整体右偏约 174 屏幕像素，所以 `-116` Panorama px 的菜单偏移判断不变，人物不移动。
+
+实机现象定位到状态缓存而非偏移量：原生 hover/refresh/Think 会重算 Panorama 样式；此前 `g_LayoutShifted` 和 `g_PromoHidden` 只记录“曾经写入”，原生覆盖 x/visibility 后仍使 apply 函数提前返回。修正为每次 `Update` 都重新确认并写入 `.buymenu-left` 的 x 与 `CategoryContainerPromo` 的 visibility，并在原生 `Hover`、`Think` 返回后再次施加。两个 bool 只用于 close/reset 恢复，不再充当当前 Panorama 实际状态的缓存。独立 debug 开关、默认值、作用域和清理行为保持不变。
+
+该修正的 Release x64 构建成功，`git diff --check` 通过，产物 SHA-256 为 `49C8F1436EFDC4ABE14F2422ABA04C9EE99B2814FCF14E6020EE171846AEDB3B`。确认 CS2 未运行后，将上一版备份为 `AfxHookSource2.dll.backup-20260926-2221`（SHA-256 `3022F237F9482DFB0C18C0C1F6C1F28364CB0D80DD75C1FA7B939D58F0A54F82`），并安装新 DLL；安装文件与构建产物哈希一致。未启动或重启 CS2/HLAE，hover 后布局稳定性及 promotion 隐藏仍待实机验证。
+
+### 原生 live 路径复核：撤回未经验证的缓存根因和固定偏移结论
+
+用户再次确认上述版本两个问题均存在，并明确本轮只做静态分析、不启动游戏。因此前文“定位到状态缓存”“偏移判断不变”不能视为已确认根因；旧截图不是经本轮验证的 pristine live 基线，174 屏幕像素到 116 UI px 的换算也没有当前 UI scale 证据。本轮不修改或部署 DLL，不宣称问题已修复。
+
+当前分析 client.dll SHA-256 `9b4f46dbd6a433163b39d7ea0123c321b1ad6d95ceedd40ae121312464833549`，panorama.dll SHA-256 `fc3cd563995130dd88a0c92b15deca26bd0fb5504b96483ab98bb243ca7f091d`，两者 image base 均为 `0x180000000`。从本机安装的 pak01 VPK 重新抽取资源：`panorama/styles/buymenu.vcss_c` SHA-256 `d8a608e60e0024ecf821334e12d453b0f22fa463ad23ebe10d02057fbd4c4fc7`；`panorama/layout/buymenu.vxml_c` SHA-256 `6e31de1fa8acc8aaf871b59304cf3ccd9c9b76ca0eaad34d9104b40ffb5c1987`。提取脚本及资源位于 `diagnostics/buymenu-live-20260926/`；XML 的 LaCo 块尚未解码，不能声称已复核完整父子布局。
+
+原生资源明确：`.buymenu__contents` 是 `flow-children:right; horizontal-align:center; transform:translateX(-50px)`；`.buymenu-left` 是向下流布局，`margin-left:16px; margin-top:180px`；购物信息栏宽 950px；`.buymenu-right` 使用 `flow-children:none; padding-top:38px; z-index:-1`；`.buymenu-agent` 为 `width:100%;height:100%;horizontal-align:left`。这些是相对父容器的 CSS 值，不是人物在屏幕上的绝对坐标。原生整体居中取决于参与布局的子面板尺寸，不能由左栏宽度单独求出屏幕 x。
+
+Panorama 原生流布局 RVA `0x100460` 在 VA `0x180101615`/`0x18010165F` 构造 Position 属性并写入子面板位置。Position allocator RVA `0x174010` 和原生 SetPosition RVA `0x102580` 使用 canonical property ID `byte_1805E01C8`；parser RVA `0x17F320` 将它与单轴 alias 分开处理。当前 `MirvPanorama.cpp::makeXProperty` 用 `x` alias 作对象 ID，而布局引擎会重新计算流式子节点位置。因此当前 `MirvPovBuyMenu.cpp::ApplyLayoutOffset` 的反复写 x 方案存在静态实现问题，但尚未证明它独自解释全部悬停行为。上述 Panorama 例程只用于分析，本轮未新增 hook。
+
+原生 promo：client RVA `0xDA3860` 绑定 `promo-item`，在 BuyMenu+576 存 weak handle，+640 存特殊槽位 -2；FullRefresh RVA `0xDBAF60` 在五个普通分类之后显式调用 item refresh RVA `0xDADA60` 处理该记录。item refresh 对 slot=-2 且 `qword_1825288E0+88` 的布尔值开启时走独立促销路径（getter RVA `0x88BD30` 当前返回 definition index 12），否则调用 loadout getter RVA `0x904AF0`。对空 item 或 item+488 无效，原生通过 UIPanel vtable+1280 将 `Hidden` 类打开；类名由 RVA `0x51740` 确认为大小写精确的 `Hidden`。所以应该追踪特殊槽位和原生 Hidden 状态，而不是将它等同于普通 loadout 中的 Knife；本轮尚未确认该布尔变量名称，也未证明用户可见 Knife 的实际 item 来源。
+
+当前 visibility 属性的编码与原生一致：Panorama RVA `0xF2150` 使用有效标志 byte+16=1、visible byte+17=bool，经 setter RVA `0x194510` 写入 panel+104。故不能仅因隐藏无效便断定 visibility 数值格式错误；尚需确认现有 `FindChildInLayoutFile` 是否定位到实际 promo 面板、style 初始化及写入是否成功。client Think 内 RVA `0xDC1540` 是地面武器枚举与数量更新，不是悬停布局函数；现有名为 Hover 的 RVA `0xDC2460` 也不能仅凭命名认定为所有鼠标事件的入口。
+
+验证边界：本轮静态确认 CSS、促销刷新分支、Hidden 类及 Panorama 布局写入路径；未进行 live/offline 对照、没有启动游戏、未完成运行时根因闭环。修复方案应先恢复正确的原生布局与 promo 状态，不能继续用截图推算的固定偏移冒充 live 行为。
+
+### 同构建续查：XML 层级、真实 mouseover 与促销开关身份
+
+本节沿用上节完整 client/panorama SHA-256、资源 SHA-256 和 image base，不跨构建移植地址。仅静态分析，未修改实现、未构建或安装 DLL，未启动游戏。精简伪代码保存于 `diagnostics/buymenu-live-20260926/0x*.c`。
+
+使用本机 `diagnostics/weapon-sounds-20260922/tools/cli/Source2Viewer-CLI.exe`（20.0.0.0）对当前 `buymenu.vxml_c` 执行 `-i <file> -a`，成功从 LaCo 重建 XML。人物 `MapPlayerPreviewPanel#id-buymenu-agent` 和 `.buymenu__contents` 是 `.buymenu__fullscreen` 的同级子节点；人物不在左右栏的横向流中。人物资源指定 `map="ui/buy_menu" camera="cam_buymenu" playername="vanity_character" pin-fov="vertical" mouse_rotate="false"`，因此确切人物屏幕投影还涉及该场景/相机，不能直接从 agent 面板 left 对齐推算。
+
+`.buymenu__contents` 的直接子节点只有 `.buymenu-left` 和 `.buymenu-right`。右栏含 purchase-failure container、`#ItemDesc.buymenu-item-info.Hidden` 和 `.vline`；右栏无显式宽高，ItemDesc 自身宽350、高110、margin-left32。左栏包括 info、body、ground-weapons；promo 位于 body 中，在普通 CategoryContainer1..5 的分类容器之外。这建立了布局父子关系，但当前共享 `csgostyles` 中 Hidden 的确切声明及实际布局尺寸仍需核对，不能把350+32直接当作实测右栏宽度。
+
+构造函数 client RVA `0xD98740` 在 VA `0x180D98AC6` 查找 ItemDesc，`0x180D98AEA` 将 client panel 保存至 menu+440。真实 mouseover RVA `0xDA8DC0` 写 menu+664=slot，播放 `buymenu_mouseover`，调用 Select RVA `0xDB6A80`；成功后在 VA `0x180DA8E34` 通过 UIPanel vtable+1176 移除 ItemDesc 的 Hidden 类。对应 mouseout/清理 RVA `0xDAA110` 将 menu+664=-1，在 VA `0x180DAA2D5` 经 vtable+1152 加回 Hidden。现有 POV Hook 名为 Hover 的 RVA `0xDC2460` 并非此 mouseover；Select detour 的 Scope 也在原生 mouseover 操作 Hidden 之前退出。这确认了悬停会切换右栏子面板状态，但未证明其本身就是异常右移的全部原因。本轮没有 hook 这两个事件函数。
+
+促销开关名称已确认：字符串 VA `0x181C072E8` 的引用指向注册函数 RVA `0xAE980`，它在 VA `0x1800AEA0E` 为地址 `0x1825288D8` 注册 `mp_promoted_item_enabled`，描述为允许购买 promoted item。ConVar 引用初始化 helper RVA `0x19A87D0` 明确写入对象+8，因此 item refresh 读取的 `qword_1825288E0` 正是该引用的数据指针，而不是另一个相邻变量。未读取运行时值，未据此断言该 demo 开关实际为1。
+
+排除一条 Knife 猜测：当前 `ObservedLoadout`（`MirvPovBuyMenu.cpp:240`）以 unsigned slot 接收-2，无法匹配 uint16 网络slot；但默认 getter RVA `0x83D270` 在 VA `0x18083D279` 明确检查 `slot > 57 || team > 3` 并返回0，因此该回退不会把-2映射成 Knife。原生 Select RVA `0xDB6A80` 自身有-2专用路径，绕过loadout getter、使用 definition12；它与 refresh 的促销路径需分别看待，不能将普通loadout命中数当成promo来源证据。屏幕上的 Knife 实际item来源、隐藏写入为何无效仍未闭环。
+
+### 2026-09-27：Hidden 不折叠占位；缺失促销定义的 Knife fallback
+
+再次计算本机 client.dll SHA-256，仍为 `9b4f46dbd6a433163b39d7ea0123c321b1ad6d95ceedd40ae121312464833549`，image base `0x180000000`；沿用同构建数据库。本轮仅提取分析资源和更新记录，未改实现、未启动游戏、未构建/安装 DLL。新增可读资源位于 `diagnostics/buymenu-live-20260926/native/`。
+
+**布局反证**：当前解码 `panorama/styles/buymenu.css:797-800` 明确为 `.Hidden { opacity: 0; }`，没有 collapse。`ItemDesc` 使用的就是该类；它属于购买菜单 XML 显式 include 的 buymenu.vcss，不需要从 csgostyles 或 HUD 推测。purchase-failure label 的特定 Hidden 规则另有 height:0，不能套用到 ItemDesc。因此撤回“鼠标切换 ItemDesc Hidden 释放右栏宽度”的候选解释；原生说明栏仅变透明，仍保留布局占位。前文真实 mouseover/mouseout 对 Hidden 的切换证据仍有效，但它不等于尺寸改变。目前更需要检查 POV 写 x 与原生 flow 重排的冲突，而非移动原生人物相机。尚无运行时位置/尺寸读回，不能声称已确定最终重排根因。
+
+**促销定义链**：从当前 csgo VPK 提取 `scripts/items/items_game.txt`，SHA-256 `bf542a67a0e2fa41a57aabefbcb9e0cd84fab1cc4168d435ea95f4ea4c545bfc`。根 items 块从4725行开始；4813..4830行同级 item11 后接 item13，没有 item12。4727..4736行的 `default` 明确是 `item_class=weapon_knife`、`item_name=#SFUI_WPNHUD_Knife`、`hidden=1`。这里不是将其他 paint/sticker 块中的12当作物品，也不是把12等同普通 Knife index42/59。
+
+原生 item 获取 helper RVA `0x1131320` 先查 cache，未命中走 RVA `0x11505E0` 创建。创建过程在 VA `0x18115069B` 调用初始化 RVA `0x118E850`，将所请求 definition（此处12）写到 item+442，在 VA `0x18118E92B` 调用 schema lookup RVA `0x112CFB0`，第三参数为0。该 lookup 缺失条目时于 VA `0x18112D033` 返回 schema+328 的 default 指针。schema items parser RVA `0x11058E0` 在 VA `0x18110597F` 与字符串 default 比较，并在 VA `0x181105A0F` 保存该对象至 schema+328，完成 default 身份核验。初始化对非空 fallback 仍在 VA `0x18118E963` 设置 item+488=1；所以 BuyMenu 的“无 item/invalid item 则 Hidden”检查不会仅因 definition12缺失而隐藏此 fallback。证据保存为 `item-init.c`、`schema-lookup.c`、`schema-default.c`。
+
+由此可建立静态条件链：促销刷新分支启用 -> 请求缺失的12 -> schema默认Knife -> item validity=1 -> 不走无效商品Hidden分支。它能解释 PROMOTED Knife，并且与此前排除的普通loadout负槽位回退不同；但用户 demo 的实时开关值和实际命中分支没有采集，因此“该次画面一定走此分支”仍保留运行时验证边界。
+
+本机 `game/csgo/cfg/gamemode_competitive.cfg:110` 明确 `mp_promoted_item_enabled 0`（文件 SHA-256 `0fbfe276a6ccb8fcde924dc46914fc0a19bbc78562f6dbc12e0ee9d95547d551`），其他 casual/deathmatch/rush/competitive_tmm 配置也为0。这是正常竞技模式的配置证据，不等同于已验证 demo 客户端会执行这些 cfg。现有强制隐藏 helper 为何未生效尚无根因证据；不能用 schema fallback 解释一个已经成功 collapse 的面板为何仍显示。后续应分别核验 promo 面板定位/写入/读回，以及模拟上下文中的促销状态，而非全局修改竞技配置。
+
+### 2026-09-27：Panorama ABI 排除检查及静态结论边界
+
+沿用上节 client identity 和 panorama SHA-256 `fc3cd563995130dd88a0c92b15deca26bd0fb5504b96483ab98bb243ca7f091d`，image base `0x180000000`。只做静态复核，未新增 hook 或改实现。
+
+通过 CUIPanel RTTI COL VA `0x1804ED928` 定位 vtable VA `0x1804CB2A8`。vtable49 对应原生 FindChildInLayoutFile RVA `0xF8660`，使用 children count+40、array+48、child flags+284 bit0x40；GetID vtable10 / RVA `0x112760` 从 panel+16 取字符串（空时返回空串）。这些与 `DeathMsg.h:25-30`、`DeathMsg.cpp::findChildInLayoutFile` 的0x10/0x28/0x30/0x11C偏移及边界逻辑一致。因此没有静态依据认定旧偏移导致本次 promo 查找失败；实际实例是否命中仍必须读回。
+
+visibility symbol 注册位于 panorama VA `0x180061270`，将明确字符串 visibility 和 `byte_1805E1BD5` 交给 RVA `0x16D560`。原生 SetVisible RVA `0xF2150` 使用相同 Visible 结构编码和 panel+104 的 style。当前 setter RVA `0x194510` 后接 `0x194800`，后者会更新样式并经 panel vtable+584 触发 invalidation；因此“我们漏掉一条必要的额外 invalidation 调用”也没有证据。
+
+**细化 x alias 判断**：原生 VA `0x18005BFF0` 注册 x symbol，紧随的 RVA `0x5C010` 确实给 x 注册 Position factory，allocator RVA `0x174010`、clone RVA `0x174060`，factory中还保存 canonical position ID。因此 x 不是没有注册的无效属性；撤回把“findSymbol(x)”单独等同于确定错误的说法。当前手工 Position 对象仍与原生 allocator 的 canonical ID/未指定值初始化不同，且流程布局会计算子位置；但尚未证明该差异一定造成用户所见右移。不能仅凭前述差异继续改偏移并宣称修复。
+
+当前 helper 的 bool 成功只表示构造属性并调用 setter，不是从实际 UI 读回可见性/布局；g_PromoHidden/g_LayoutShifted 同样不提供验证。剩余关键数据是：运行时 promo container与menu+576弱句柄解析结果、promo record+64的slot/+72 item与definition、mp_promoted_item_enabled实际值、visibility/opacity写入前后值、左右栏及ItemDesc在mouseover前后实际尺寸位置。静态分析不能替代这些值。本轮结束时不声称已确定强制隐藏失效或重排的最终根因；下一步应是受控诊断采样，保持不自动启动游戏的边界。
+
+### 2026-09-27：经用户授权加入运行时采样，不改变现有修复策略
+
+分析身份：client SHA-256 `9b4f46dbd6a433163b39d7ea0123c321b1ad6d95ceedd40ae121312464833549`，panorama SHA-256 `fc3cd563995130dd88a0c92b15deca26bd0fb5504b96483ab98bb243ca7f091d`，image base 均为 `0x180000000`。本轮再次核对安装 client 的完整哈希。原生行为证据沿用前述 promo refresh / mouseover 链，不新增任何 native hook。
+
+`MirvPovBuyMenu.cpp::CaptureBuySnapshot/PrintBuySnapshots` 在普通 Release 的 `mirv_pov_buymenu_status` 输出诊断版本 `20260927-1`。仅保留最近 12 条值快照：原生 open 返回后样式前/后、已存在的 Select hook（client RVA `0xDB6A80`）调用前/后、menu+664 的 hover slot 改变、随后两个 Update 帧和 status 时刻。Select 返回时 ItemDesc 的 Hidden 类尚可能未被外层 mouseover 移除，因此必须与后续帧比较；此处不把 Select hook 当成真实 mouseover hook。新开菜单清空旧采样；关闭/Reset 保留最后快照，打印不解引用历史地址。无逐帧控制台刷屏，无新可见效果、无新 debug 开关，也不主动控制游戏生命周期。
+
+快照分别记录 `mp_promoted_item_enabled`（client RVA `0x25288E0` 指针的 +88）、promo slot（menu+640）、item（menu+648）、item definition(+442)/valid(+488)，以及 root/left/right/promo container/promo item/ItemDesc/preview 的地址、父面板、vtable34 Visible 和 Hidden class。`promo_setter/layout_setter` 仅表示最近一次 Apply 构造并调用 setter 成功，明确不是读取到的隐藏/移动成功；feature 请求值单独输出。保留原来的 -116 x 和 visibility 写入方式，仅修正不当的“已验证原生锚点”代码注释。
+
+Panorama 私有字段读回先检查该模块文件完整 SHA-256，并核对 CUIPanel vtable100/103/115/117 的 RVA `0x111A20/0x1119E0/0x1127B0/0x1118C0`，不匹配则 `readback=0`。这些未 hook 的 getter 的指令以及 vtable VA `0x1804CB2A8` 提供布局字段依据。输出保留原始偏移名：`native_1b0/1b8/1c0/1d0` 为四组 float2，`native_1f0` 为 float3。原生 RVA `0x102CF0/0x102EA0` 还会根据 position property 的 unit、父面板尺寸以及 +0x1C0/+0x1C4 组合结果，故原始字段不能冒充屏幕像素或最终变换后包围框。`visible/Hidden` 同样不能代替 opacity/computed visibility 的完整级联结果；此版尚未读取 effective opacity，不能凭 Visible=1 单独认定最终绘制可见。
+
+验证：Release x64 AfxHookSource2 构建通过（SDK 既有 C4819 警告），`git diff --check` 通过。首次沙箱构建被 NuGet.Config 访问权限阻止，提升权限后成功。尚未启动游戏、未做实机采样，不宣称 Knife 或 hover 布局已修复。用户复现后执行一次 status 即可提供有界历史；若需原生布局对照，可由用户通过既有独立 feature 开关关闭 layout/promo hide 后另行采样。
+
+安装：确认 CS2 未运行（保留已运行 HLAE，不操作进程），将旧安装备份为 `D:\Edu\Python\CS_AutoHighlight\tools\hlae\x64\AfxHookSource2.dll.backup-20260927-diag-1103`，备份 SHA-256 `49C8F1436EFDC4ABE14F2422ABA04C9EE99B2814FCF14E6020EE171846AEDB3B`。新诊断 DLL 已复制到同目录 `AfxHookSource2.dll`，安装文件与 Release 构建产物 SHA-256 一致：`EB59DFD5912E9BB2AB2C0A0D06588C8B15116400D133CE9FED7FF7A4A52BADA9`。未启动、关闭或重启 CS2/HLAE，未提交或推送。
+
+### 用户测试日志：2026-09-27 11:06
+
+只读检查本机 `game/csgo/console.log`：第794行 build `2026-09-27T03:01:19Z`，1438行确认诊断版本 `20260927-1`、panorama_supported=1。1439–1534行为同一菜单保留的12条快照；用户在菜单关闭后执行 status，故1437行 active=0 不代表历史采样时没有运行。此次没有再读取二进制或产生新的 VA/RVA 结论，构建身份以该诊断版的既有完整 client 哈希门和 panorama 哈希门为依据。
+
+已实测：全部快照 hide_requested=1、shift_requested=1，但 promo_setter=0、layout_setter=0；promo_container 与 left 指针均非空、readback=1。promoted_enabled=1，promo_slot=-2，definition=12，valid=1；promo container/item 持续 Visible=1。结合 `MirvPanorama.cpp::makeVisibleProperty/makeXProperty`，当前证据将失败定位至 setter 之前的属性构造/依赖初始化，而非“调用写入成功后被 hover 覆盖”。日志没有分别输出 vtable 和 symbol，不能从这些0单独断定是哪一个依赖缺失。
+
+源码进一步找到初始化缺口：`DeathMsg.cpp::getPanoramaAddrs` 中唯一的 `MirvPanorama_InitStyleProperties` 调用被 `DeathMsg_ShouldProcessPanoramaPath()` gate 包围；该 gate 依赖当前 POV 或 deathmsg color 配置。`MirvPovCore.cpp` 默认 POV=false；HookPanorama 在已 hooked 时直接返回，没有后续按需补初始化，而 SetVisible/SetX 也没有 ensure-ready 路径。因此普通启动后才输入 `mirv_pov 1` 可以跳过全部样式属性初始化，符合两个 setter 同时失败。该控制流缺陷已由源码确认；本次没有读取进程内各全局值以排除部分初始化失败等其他分支。
+
+布局的新增实测：sample6 hovered=-2（促销商品），sample7 Select 返回后 ItemDesc Visible 从1变0；sample8右栏 native_1b8 从382x818变为32x38，并持续到sample11。左栏记录仍950x816、native_1c0=(16,180)，preview仍为全屏面板。证据支持“促销项使详情面板退出布局，右栏宽度缩小，可能触发共同居中容器重排”的机制，而非人物面板自身宽度改变；共同父容器坐标/最终屏幕边界本次未采样，不能量化全局横移或宣布最终位置结论。此轮只更新调查记录，未修改行为、未编译或替换DLL、未控制游戏进程。
+
+### 2026-09-27：投掷物全灰的新反馈（静态证据，待运行时返回码）
+
+用户确认 Knife 隐藏和布局已正常，新增截图显示余额3700但五种投掷物全灰。最新 console.log 1525行确认11:17:00样式按需初始化成功，未找到本次 `slot=... acquire=...` 输出，不能由价格或截图直接断言购买判断错误。
+
+重新校验安装 client SHA-256 为 `9b4f46dbd6a433163b39d7ea0123c321b1ad6d95ceedd40ae121312464833549`，复用 client-current 数据库，image base `0x180000000`。原生 item refresh（未hook的 helper，RVA `0xDADA60`）在 VA `0x180DAE187` 调用 CanAcquire（未hook的 helper，RVA `0x8C16F0`），参数为 pawn+0x12F8 的服务和 acquire method 1/2；VA `0x180DAE19C` 将余额够用与 acquire返回0进行逻辑与，VA `0x180DAE1FC` 依此设置 cant-buy class。因此有钱不保证原生菜单亮起。
+
+CanAcquire 对 type=9 的 grenade 在 VA `0x1808C1996` 读取 client RVA `0x24B7150` 指针+88，false返回9。注册函数 RVA `0x85130`/VA `0x1800851BE` 确认该引用的名字为 `mp_buy_allow_grenades`（对象起点 RVA `0x24B7148`，reference data为+8）。其后还有同类携带上限返回4、总携带上限返回5、每回合购买数量限制返回3、净购买总量限制返回15。总携带上限从 RVA `0x24B0410` 指针+88读取，实体库存遍历服务为 pawn+0x12F0；每回合购买记录从 pawn+0x1590 的服务读取。不能绕过这些条件或仅按价格移除灰色 class。
+
+POV实现未对此购买判断加hook，目前依然复用上述原生 helper；`MirvPovBuyMenu_PrintStatus` 已打印逐槽 definition/price/acquire/owned_weapon。下一步需要用户保持菜单打开并执行 status（关闭后该分支不输出），同时只读查询 `mp_buy_allow_grenades` 和 `ammo_grenade_limit_total`。本轮未改行为、未编译/替换DLL、未操作游戏。静态JSON证据保存在 `diagnostics/buymenu-grenades-9b4f46db-20260927.json`，未另开IDA或覆盖旧库。
+
+### 2026-09-27：修复启动后开启 POV 时遗漏样式初始化
+
+用户授权修复后，`MirvPanorama.cpp::CUIPanel::setOpacity/setVisible/setX` 统一先调用 EnsureStyleProperties。缺少 panorama 模块时返回 false 但不锁死重试；模块存在时调用已有符号/RTTI discovery，成功和失败均按 HMODULE 缓存，避免每帧扫描。不修改原生函数、签名或上述 client/panorama 构建记录，不新增 hook。所有依赖解析完成才置 ready；部分解析失败时 setter 不执行，避免空函数指针。原来的 ErrorBox 改为单次控制台警告，position vtable 缺失仍仅阻止 position 属性构造。明确使用 byte-pointer + panelStyle，清零 Visible/Opacity 对象 padding。`DeathMsg.cpp` 仅更新启动发现路径的注释。
+
+没有添加新效果；既有 `buymenu_promo_hide`、`buymenu_layout` 独立控制、关闭恢复逻辑保持不变。本次不改变 -116 偏移或促销开关，先修复导致既有隐藏/位置 setter 根本未执行的缺陷。隐藏 promo 的预期作用还包括阻止鼠标进入特殊槽位 -2；是否消除实际重排仍待用户验证，未将该预期写成实测。诊断版本更新为 `20260927-2`，保留前后快照和 setter/readback 的区别。
+
+验证：Release x64 构建通过，SDK 既有 C4819 警告；`git diff --check` 通过。源码复核了缺模块后可重试、同模块成功/失败缓存、三个 setter 均先检查 ready，以及失败时不调用 setter。未做进程内断言或游戏内 off/on/重启测试，不能将源码复核替代实机测试。确认 CS2 未运行后安装到 `D:\Edu\Python\CS_AutoHighlight\tools\hlae\x64\AfxHookSource2.dll`，构建与安装 SHA-256 均为 `8953D1CBD21864F11CC2D4140ACCFA1507C985B7A2331F16A313880D00060F35`；旧版备份后缀 `.backup-20260927-style-init-1115`，备份 SHA-256 `EB59DFD5912E9BB2AB2C0A0D06588C8B15116400D133CE9FED7FF7A4A52BADA9`。未启动、关闭或重启 CS2/HLAE，未提交或推送。

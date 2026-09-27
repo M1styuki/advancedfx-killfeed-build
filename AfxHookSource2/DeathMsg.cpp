@@ -2120,9 +2120,8 @@ bool getPanoramaAddrs(HMODULE panoramaDll) {
 		g_Org_Panorama_CStylePropertyWashColor_Parse = (Panorama_CStyleProperty_Parse_t)vtable[6];
 	}		
 
-		// Style-property discovery is optional. MirvPanorama_InitStyleProperties
-		// uses ErrorBox on unsupported builds, so defer it until a POV/deathmsg
-		// Panorama feature is actually active during startup.
+		// Style-property discovery is optional at startup. Setters also ensure
+		// initialization on demand when POV/deathmsg is enabled after startup.
 		if (DeathMsg_ShouldProcessPanoramaPath()
 			&& !MirvPanorama_InitStyleProperties(panoramaDll)) return false;
 
