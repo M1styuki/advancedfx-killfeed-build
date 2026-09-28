@@ -346,7 +346,15 @@ bool Dispatch(size_t creator) {
 }
 CEntityInstance * __fastcall GetPawn(int slot) {
     if(g_Depth && InClient(_ReturnAddress()) && (slot == 0 || slot == -1)) return g_Pawn;
-    return g_GetPawn(slot);
+    // Preserve the native call site for other scoped consumers of this getter.
+    void * previous = MirvPov_PushHookReturnAddress(_ReturnAddress());
+    CEntityInstance * pawn = nullptr;
+    __try {
+        pawn = g_GetPawn(slot);
+    } __finally {
+        MirvPov_PopHookReturnAddress(previous);
+    }
+    return pawn;
 }
 CEntityInstance * __fastcall GetController(int slot) {
     if(g_Depth && InClient(_ReturnAddress()) && (slot == 0 || slot == -1)) return g_Controller;

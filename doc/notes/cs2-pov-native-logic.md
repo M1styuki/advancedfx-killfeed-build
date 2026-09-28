@@ -612,3 +612,108 @@ POV实现未对此购买判断加hook，目前依然复用上述原生 helper；
 没有添加新效果；既有 `buymenu_promo_hide`、`buymenu_layout` 独立控制、关闭恢复逻辑保持不变。本次不改变 -116 偏移或促销开关，先修复导致既有隐藏/位置 setter 根本未执行的缺陷。隐藏 promo 的预期作用还包括阻止鼠标进入特殊槽位 -2；是否消除实际重排仍待用户验证，未将该预期写成实测。诊断版本更新为 `20260927-2`，保留前后快照和 setter/readback 的区别。
 
 验证：Release x64 构建通过，SDK 既有 C4819 警告；`git diff --check` 通过。源码复核了缺模块后可重试、同模块成功/失败缓存、三个 setter 均先检查 ready，以及失败时不调用 setter。未做进程内断言或游戏内 off/on/重启测试，不能将源码复核替代实机测试。确认 CS2 未运行后安装到 `D:\Edu\Python\CS_AutoHighlight\tools\hlae\x64\AfxHookSource2.dll`，构建与安装 SHA-256 均为 `8953D1CBD21864F11CC2D4140ACCFA1507C985B7A2331F16A313880D00060F35`；旧版备份后缀 `.backup-20260927-style-init-1115`，备份 SHA-256 `EB59DFD5912E9BB2AB2C0A0D06588C8B15116400D133CE9FED7FF7A4A52BADA9`。未启动、关闭或重启 CS2/HLAE，未提交或推送。
+
+## 2026-09-27：MVP 横幅存在但音乐缺失的原生上下文补齐
+
+### 当前构建与原生行为
+
+重新以 synchronizer dry-run 核验安装 client.dll，SHA-256 为 `9b4f46dbd6a433163b39d7ea0123c321b1ad6d95ceedd40ae121312464833549`，image base `0x180000000`。原库打开失败，复制已有 `client.i64` 到 `diagnostics/mvp-9b4f-20260927/client-mvp.i64` 后继续局部分析，没有重新分析 DLL 或覆盖原库。以下 RVA 的 analysis VA 均为 `0x180000000 + RVA`。
+
+- controller 的 MVP 计数通知 RVA `0x89F3F0` 构造 `round_mvp`，填写 userid、reason，以及存在时的 nomusic、musickitid、musickitmvps，经 GameEventManager vtable slot 8 分发。音乐盒由获奖玩家的事件字段决定，不能固定播放观看者的音乐盒。
+- 原生事件监听器 RVA `0xCEADB0` 先验证 splitscreenplayer 与监听器 slot，再取得库存全局和本地普通 player pawn；VA `0x180CEAEA1` / `0x180CEAEAA` 的判空分支在任一缺失时跳过普通事件处理。getter 调用点 RVA `0xCEAE52` -> helper `0xC7C460` -> local pawn getter `0x96B2A0`。helper 检查 pawn vtable slot 158 / `+0x4F0`。
+- `round_mvp` 分支 RVA `0xCEB4F1` 取得获奖 controller 和 musickitid（默认 `0xFFFF`）；普通路径接受 unsigned 16-bit ID `2..65534`，特殊游戏模式还可进入其替代路径。原生没有有效获奖 controller 时退出。POV 不伪造缺失 ID、不补造事件。
+- `0xCEB5C0` 调用音乐许可 predicate `0xEC4AC0`，保留 `snd_mute_mvp_music_live_players`、事件 nomusic、本地 pawn 观察状态和特殊游戏模式条件。通过后在 `0xCEB5DA` 调用 `0x76FF20`，音乐类型为 11；不通过则走 `StopSoundEvents.StopAllMusic`。监听器同时按原生方式更新 pawn `+0x1520/+0x1524` 的音乐类型/时间，并提交 OnRoundMVPShown；这些原生状态写入没有由 POV 自行复制或改布局。
+- 播放 helper `0x76FF20` 使用类型表中 `Music.MVPAnthem`，从经济 schema 查询 music kit 名，组成 `Music.MVPAnthem.<kit>` 后提交 SoundSystem slot 13 / `+0x68`。demo controller `0xD35C70()` 的 suppress byte `+0x72` 为真时提前退出。POV 保留该门槛，不改音量、音乐资源或 ConVar。
+- WinPanel 的另一监听器 RVA `0xEAF550` 处理横幅，与上述依赖本地 pawn 的音频监听器分开。故横幅显示不证明音乐分支已运行。本次静态确认缺少 POV pawn 上下文的路径；尚未采集用户失败时真实 getter 返回值，不能将其写成该次回放的唯一已实测根因。
+
+### POV 接入与独立控制
+
+新增 `AfxHookSource2/MirvPovMvpMusic.cpp/.h`，不新增二进制 detour，也不直接调用播放 helper或重发 round_mvp。复用 `GameEvents.cpp::New_CGameEventManager_FireEventClientSide` 的原有 slot 8 hook，仅在 native 分发期间保存完整 POV pawn handle；嵌套非 MVP 事件临时清除上下文，`__finally` 恢复前一层。原生调用可能销毁事件，返回后不再读它。
+
+复用 `DeathMsg.cpp::DeathPanel_GetLocalPawn` 对 `0x96B2A0` 的既有 detour，仅在 `round_mvp`、有效 demo、有效 T/CT POV、主开关与 `mvp_music` 均开启且完整 handle 一致时，对两个返回地址提供该 pawn：
+
+| 返回地址 RVA | 原生调用 | 用途 |
+| --- | --- | --- |
+| `0xC7C46D` | `0xC7C468 -> 0x96B2A0` | 普通 player pawn helper；作用域限制在 MVP 同步分发期间 |
+| `0xEC4B2D` | `0xEC4B28 -> 0x96B2A0` | 让原生静音许可按当前 POV 状态判断 |
+
+helper `0xC7C460`、音乐监听器 `0xCEADB0`、许可 predicate `0xEC4AC0`、音乐播放 `0x76FF20` 均未新增 hook，仍由原生事件链调用。初始化验证三个唯一签名 `kPlayerGetter/kMutePredicateCall/kListenerCalls` 及共同 getter 目标/监听器调用关系；完整字节签名保存在源码和 `static-audit.json`。不匹配则禁用该修复并发出警告，不使用旧 RVA 强行安装。
+
+`MirvPovBuyMenu.cpp::GetPawn` 的透传分支新增原始 return-address 传递，防止购买菜单与共享 getter 的多层 detour 丢失游戏调用点；`__finally` 保证异常时也恢复线程局部地址。购买菜单自己的 scope 行为保持不变。
+
+Release 独立开关 `mirv_pov_debug_feature mvp_music 0|1` 默认 1、即时配置，只影响后续 MVP 分发。关闭不会改横幅、投掷语音或其他效果，也不强制停止已经交给原生系统的声音；已播放音乐自然结束。重新开启不重播旧事件；主 POV 关闭后补偿无效，重新启用保留 feature 配置。没有跨帧队列、历史 event 指针或缓存实体地址，dispatch 返回即恢复上下文，seek/换图不额外补播；原生音乐状态和 suppress 路径继续负责其生命周期。
+
+### 验证与边界
+
+- `verify_mvp.py` 对上述完整 DLL 哈希、三个签名的唯一匹配、相对 call 目标和实际 MVP 许可/播放调用点做离线断言，通过。
+- 使用新增源码中的实际 PushEvent/PopEvent/GetLocalPawn 函数，配 mock engine/entity 编译运行 21 项断言，通过：两个许可 caller、其他 caller、嵌套非 MVP、关闭/恢复 feature、主开关关闭、无 demo、无目标、目标 handle 改变、旁观队伍、非法类型和未解析地址。此为控制流单元核验，不能冒充游戏音频或 Detours 实测。
+- 独立代码复核发现购买菜单透传异常时可能遗留 caller，已补 `__finally`；最终非诊断 Release x64 构建成功，`git diff --check` 通过。最终 DLL SHA-256 `EB1DEAD79B1C3E2AABAD9D7125BB30DF57A5F6BAA8C4973290340D52DC47F06C`。
+- 证据目录 `diagnostics/mvp-9b4f-20260927/`：`native-evidence.json`、`static-audit.json`、`context-test.log`、`build-final.log`。首轮构建因沙箱不可读取 NuGet.Config 失败，提升权限后的构建成功。
+- 未启动、关闭或重启 CS2/HLAE；未执行实机 MVP 听感、不同音乐盒、seek、开关矩阵或 live/demo 音频对比。若 demo 没有有效音乐盒 ID、原生静音许可不通过或音量为零，本修复不会绕过这些条件。当前结果为可回放验证的实现，尚不能宣称与 live 完全一致。
+
+部署：确认 CS2 未运行后安装至 `D:\Edu\Python\CS_AutoHighlight\tools\hlae\x64\AfxHookSource2.dll`，目标 SHA-256 与上述最终构建一致。旧文件备份为同目录 `AfxHookSource2.dll.backup-20260927-153806-mvp`，备份 SHA-256 为 `C2BE5C34BDEC8A59ED554D6E49BC11EA3D58CE20E792A5CDFA904BCE8EA3FB97`。证据 `installation.json`；未提交或推送。
+
+### 用户首次回放无 MVP 音乐：增加有界运行诊断
+
+用户明确反馈：连续播放到 MVP 时没有音乐修复效果，其他声音正常，并非跳转到横幅之后。首版不能据此标记为成功。当前 `console.log`（保存为诊断目录的 `user-first-test-console.log`）358 行为 `inferno_test.dem`，831 行为 POV enabled、build `2026-09-27T07:34:37Z`，与首版构建时间一致；没有 `native context validation failed`，但旧版不输出事件/命中数据，缺少 warning 不能证明 hook 或播放分支执行。检查时 CS2 已退出，未读取实际已加载模块或运行时变量，因此也不以安装文件哈希代替 loaded-module 核验。
+
+独立源码复核确认初始化次序 `HookDeathMsg -> HookClientDll -> Hook_CGameEventManager`，未找到新的确定性接入缺陷。没有重新假设不同音乐盒或直接补播固定音乐，本轮保留现有行为，新增诊断版本 `20260927-2`：
+
+- 普通 Release 每个 POV 下的 `round_mvp` 在原生分发返回后自动打印一条 `[mirv_pov_mvp_music]` 日志：tick、事件 musickitid/nomusic、上下文 gate、完整 pawn handle、共享 getter 总调用数、两个允许 caller 的查询/实际覆盖次数，以及只读的 master/MVP/其他模式 MVP 音量。音量读取失败记 -1；不修改 ConVar。kit 缺失记 -1，不将其当作确认无音乐盒。
+- Trace 是栈内值快照，线程局部指针仅在该次同步分发期间有效；嵌套其他事件暂停采样，`__finally` 恢复，不在 native dispatch 后访问事件对象。日志中的覆盖次数只证明 POV 返回值替换，不能冒充 SoundSystem 已播放或用户听见。
+- `mirv_pov_mvp_music_status` 只读输出解析 ready、feature active、POV 启用期间分发次数与 MVP 事件次数，用于区分根本没收到事件与后续分支阻断。ready 仅代表签名/调用关系解析成功，不代表 hook 安装或音频输出已验证。没有新增二进制 detour、用户效果或额外播放请求。
+- 更新后的 21 项原有上下文断言、静态签名核验、非诊断 Release x64 编译及 `git diff --check` 通过。没有执行游戏或验证新增日志的实际输出；该版是定位用诊断版，尚非经确认的二次修复。
+
+确认 CS2 未运行后备份并安装诊断版，构建/目标 SHA-256 `6E1E08E4CCA2EE5608026A1F061C73DE6D61157FF7F3F8F444D5FA17F15CE185`；旧版备份 `AfxHookSource2.dll.backup-20260927-155057-mvp-diag`，SHA-256 `EB1DEAD79B1C3E2AABAD9D7125BB30DF57A5F6BAA8C4973290340D52DC47F06C`。证据 `installation-diagnostic.json`、`build-diagnostic.log`、`context-test-diagnostic.log`。未操作 CS2/HLAE 生命周期，未提交/推送。下一步需用户连续复现一次并查询 status，之后读取自动日志确定真实阻断位置。
+
+### 实测上下文未命中：补齐多层 getter 的外层返回地址
+
+用户返回 `ready=1 active=1 dispatches=508 mvp_events=1`。读取当次 `console.log`，905 行记录：`tick=15815 kit=74 nomusic=0 gate=armed pawn=00530297 getter_calls=1 player_query=0 player_override=0 mute_query=0 mute_override=0 volume=0.500 mvp_volume=0.160`；其他模式 MVP 音量也为0.160。日志保存为 `diagnostics/mvp-9b4f-20260927/user-diagnostic2-console.log`。这实测证明事件及 POV 上下文已建立，实际共享 getter 被调用，但没有命中首版允许的两个 caller；不能再将事件未到达、音乐盒缺失或上述音量为0列为该次失败的解释。旧日志未记录具体 caller，仍不能仅凭这些计数直接断定运行地址。
+
+本轮 dry-run 再次确认 client SHA-256 `9b4f46dbd6a433163b39d7ea0123c321b1ad6d95ceedd40ae121312464833549`，image base `0x180000000`。原生音乐监听器 call RVA `0xCEAE52 -> 0xC7C460`，返回点 `0xCEAE57`，内层 call `0xC7C468 -> 0x96B2A0`，返回点 `0xC7C46D`，保持上节已核验关系。新增离线确认：TeamHealth builder RVA `0xEB6990` 的 call `0xEB69E5`，presentation RVA `0xEC9E80` 的 calls `0xEC9F7B/0xECA003/0xECA074`，全部也指向 `0xC7C460`。analysis VA 为 image base + RVA。
+
+源码的确定缺陷：`MirvPovTeamHealth.cpp::New_GetLocalPlayerPawn` 在调用原始无参数 getter 前执行 `MirvPov_PushHookReturnAddress(_ReturnAddress())`；Core 的该函数只在上下文为空时记录地址，因此跨入内层 `0x96B2A0` 时保留的是音乐监听器外层 `0xCEAE57`，而非内层 `0xC7C46D`。SoundCircle 的同类无参数 getter 包装也使用这一约定。首版只接受内层地址，前一轮独立复核只核对 slot getter/BuyMenu 的传递，遗漏了这个外层共享 getter。原先21项测试同样没有包含真实 Core return-address 保留规则。
+
+修正 `MirvPovMvpMusic.cpp`：在已有唯一 `kListenerCalls` 匹配和 call 目标校验通过后，保存 `listener+20` 为额外的允许 caller（RVA `0xCEAE57`）；同时保留无外层 hook 时的内层返回点和静音 predicate 点。仍只在当前 MVP 同步分发、有效 demo/POV 和独立开关开启时替换。没有放宽为全部 getter 调用，没有新增 hook，也不改变原生事件次数、音乐选择、音量或静音许可。日志版本为 `20260927-3`，额外记录首次调用点的 client RVA；不在 client 范围内则为0，避免把跨模块地址冒充 client RVA。
+
+验证：静态扫描核验上述所有调用目标与外层返回点；C++ harness 加入实际 `MirvPovCore.cpp` 的 Push/Get/PopHookReturnAddress 函数，覆盖外层与内层嵌套及开关启停，28项通过。将 harness 中唯一 caller 判断恢复为旧逻辑时，新外层 caller 断言返回预期失败码23，复现旧漏判；没有通过游戏进程执行测试。证据 `static-audit.json`、`context-test-outer-caller.log`、`context-test-pre-fix.log`。Release x64 构建及 `git diff --check` 通过。
+
+确认 CS2 已退出后备份并安装修正版，构建/安装 SHA-256 `521A150935A6577B3FC9E510B91745EBF8A5213D8D32707112587AA79C805622`；备份为 `AfxHookSource2.dll.backup-20260927-162408-mvp-outer`，其 SHA-256 `6E1E08E4CCA2EE5608026A1F061C73DE6D61157FF7F3F8F444D5FA17F15CE185`。证据 `installation-outer-caller.json`、`build-outer-caller.log`。未启动、关闭或重启游戏，未提交/推送。代码缺陷已复现并修复，但实际原生分支命中及最终听感仍待新日志和用户回放确认。
+
+### 外层上下文已命中但仍无音乐：观测原生播放链
+
+用户再次反馈无音乐。2026-09-27 16:26 的 console.log 显示 diagnostic `20260927-3`；两个事件分别在 tick 15906、15813，均为 kit=74、nomusic=0、gate=armed、first_caller_rva=0xCEAE57、player_query=1、player_override=1，master=0.500、MVP=0.160。确认上一处 caller 漏判已经修复，但它并非全部根因。mute_query=0 本身不能说明许可失败：nomusic != 1 时原生许可直接返回 true，不查询 pawn。
+
+继续分析同一完整 SHA-256 `9b4f46dbd6a433163b39d7ea0123c321b1ad6d95ceedd40ae121312464833549`、image base `0x180000000` 的既有 IDB 副本，以下 analysis VA 为 base + RVA：
+
+- 音乐监听器调用 `0x11A54F0`，函数直接读取库存全局 slot `0x25EFCB0`；本地 pawn 覆盖后仍有此判空门槛，以及 MVP controller/kit/许可门槛。尚未实测用户该次库存是否为空。
+- `0xD35C70` 返回静态 CCSDemoController 对象 `0x223B9C0`，音乐 helper 在 `0x76FF85` 检查其 `+0x72`（地址 RVA `0x223BA32`）。发现初始化方法 `0xD38500` 在 `0xD3850A` 清除此字节；读取参数值 `overwatch` 后在 `0xD3858D` 将对象 `+0x71` 的 word 写为257，连带置 `+0x72=1`。清理方法 `0xD38830` 在 `0xD38941` 清除此字节。因此它至少与 overwatch 模式有关，不能把它直接认作所有普通 demo 或 seek 的通用静音标志；并未穷尽所有写入来源。本次保留该条件，不沿用 Radio 注释的推断来强行清零。
+- 播放 helper `0x76FF20` 的 type11 路径，valid kit 直接走 `0x77015C -> 0x118BB00 -> 0x112ED00` schema 查询，无需观看者音乐盒。`0x770226` 读取 SoundSystem global slot `0x2797770`；`0x770260` 经 vtable slot13 / +0x68 提交 `Music.MVPAnthem.<kit>`，参数为 system、输出对象、name、entity=-1、false。调用返回后仅清理字符串。提交不等于声音资源成功加载或音频设备已经输出。
+
+诊断版本 `20260927-4` 在 `MirvPovMvpMusic.cpp` 增加只读观察 detour：许可函数 `0xEC4AC0`（原始返回 char 完整透传），音乐函数 `0x76FF20`（原参数透传），以及首次 MVP 音乐调用时从 SoundSystem 实例的 slot13 动态取得的提交函数。这里纠正前述历史版本“音乐 helper 未 hook”的状态：本版它被观察 hook 包装，但不主动调用/补播、不修改返回值、音量或 suppress。slot13 无固定代码地址，安装使用当前实例的虚表目标；暂未对声音模块实现作内部反编译。原生监听器 `0xCEADB0`、helper `0xC7C460` 仍未新增 detour。
+
+初始化用唯一签名 `kMvpPlaybackCalls/kMusicEntry/kMusicDemoGate/kMusicSubmit` 验证 call 目标、音乐函数内部相对位置、库存/控制器 getter 的 RIP 相对指令及 RET，并检查许可函数+0x68与既有 muteCall 相同；完整签名在源码与 `static-audit.json`。失败时 playback_observers=0，不猜旧 RVA。日志按短行输出 inventory、controller、demo_suppress、eligibility_calls/eligible、music_calls/native_kit、sound_observer/sound_calls/sound；status 保存最近一次值快照，不保存 event/entity 指针，也不借此重放。sound_calls=0 只有结合 sound_observer=1 才能判断已挂接观察器未看到提交；初次未进入音乐函数时 sound_observer=0 属正常。
+
+验证：当前 PE 上所有七个签名唯一匹配，call/RIP 全局目标核验通过；原28项上下文断言通过；生产观察函数的 mock native 回归验证原参数/返回值、非 MVP 路径透传、请求名记录、suppress 不修改、嵌套其他音乐类型和异常后的 TLS 恢复。Release x64 构建通过，只有已有 SDK 编码警告；这不是游戏音频验证。本轮不宣称修复最终无音乐原因，需实机日志区分原生前置门槛、音乐函数和声音提交三个阶段。
+
+部署：确认 CS2 未运行后安装 diagnostic `20260927-4`，构建/目标 SHA-256 `3F76FEC1DAFBDE97020659E343D69B618D4B68D8A687AEB9B476D59F15AF93D4`。旧版备份 `AfxHookSource2.dll.backup-20260927-164223-mvp-playback`，SHA-256 `521A150935A6577B3FC9E510B91745EBF8A5213D8D32707112587AA79C805622`。证据 `user-diagnostic3-console.log`、`static-audit.json`、`observer-test.log`、`context-test-playback-observers.log`、`build-playback-observers-final.log`、`installation-playback-observers.json`。未启动、关闭或重启 CS2/HLAE，未提交/推送。
+
+### 2026-09-28 实测请求已提交：发现遗漏的音乐总音量
+
+用户继续确认听不到音乐。保存的 `diagnostics/mvp-9b4f-20260927/user-diagnostic4-20260928-console.log` 记录三次 MVP（tick 17875、15831、15813）均为 inventory/controller=1、demo_suppress=0、eligible=1、music_calls=1、sound_observer=1、sound_calls=1，实际请求名 `Music.MVPAnthem.knock2_02`、kit=74。最后一次在 Demo Skipping finished 后约12秒出现。由此确认本地 pawn、许可和声音提交路径已执行；不证明后端实际发声。
+
+本轮重新计算安装 client.dll SHA-256，仍为 `9b4f46dbd6a433163b39d7ea0123c321b1ad6d95ceedd40ae121312464833549`；没有新增代码地址推断。当前 `csgo/pak01_dir.vpk` SHA-256 为 `24bf0b1ff2b16466a17eae3179bd8528c64885ab5cbb74966e6d0999440de1d4`（只标识目录包，不是所有分卷）。用本地 Source2Viewer-CLI 从该包重新提取音乐事件及 music stack 到诊断目录 assets，未改游戏资源。旧的2026-09-22提取文件只作定位，不作为本轮版本证据。
+
+原生资源证据：`assets/soundevents/music/knock2_02/game_sounds_music.vsndevts:399` 定义实际 MVP 事件，type=csgo_music、volume=0.9、volume_convar=snd_mvp_volume、priority=5、loop_track/should_queue_track=true，声音资源为 `sounds/music/knock2_02/roundmvpanthem_01.vsnd`。当前 `assets/soundstacks/soundstacks_csgo_music.vsndstck:793` 的 music_total 算子把 system_globals.output_snd_musicvolume_convar 与分项 volume_convar 相乘，随后 convar_total 再乘 snd_gain；所以分项 MVP 音量非零不排除音乐总音量静音。
+
+日志56行的 USRLOCAL 与实际测试账号的本地配置目录一致；该目录 `cfg/cs2_machine_convars.vcfg:244` 保存 `snd_musicvolume$2=0`，同时主音量0.5、MVP分项0.16，与日志相符。这里确认的是本次账号的持久化配置，前版诊断未读取运行时 snd_musicvolume，不能冒充该变量在事件时的直接采样；配置为0已足以解释请求提交却无声。此前诊断遗漏音乐总音量，不能再因 master/MVP分项非零而排除音量原因。
+
+POV 行为：继续尊重原生音乐总音量，不自动将其改成1，也不绕过原生混音播放文件。本轮只记录证据，不修改用户配置、不更换 DLL、不控制游戏生命周期。下一次验证应在控制台先查询 `snd_musicvolume`，再按用户意愿执行 `snd_musicvolume 1` 并连续播放到 MVP；听感结果仍待用户确认，无需先换新的诊断 DLL。
+
+### 2026-09-29：用户确认与提交整理
+
+用户在上述音量排查后确认“这下完美了”，验证当前 demo 的回合结束 MVP 音乐已可正常听见。该结论结合前次 `player_override=1 / eligible=1 / music_calls=1 / sound_calls=1` 形成该场景的闭环，不扩大为所有音乐盒、模式或新版本的覆盖证明。
+
+最终实现保留已验证的原生事件调用链、获奖者音乐盒选择、共享 getter 外层 caller 兼容、嵌套上下文恢复、独立 `mvp_music` 即时开关及原生静音条件。`mirv_pov_mvp_music_status` 和每次 MVP 的音量输出补齐 `snd_musicvolume`、`snd_gain`，音乐总音量为0时明确解释原因；仅查询，不改用户设置。音量行反映查询时的当前值，最近事件计数反映保存的事件快照。播放链版本标识仍为 `20260927-4`，本次整理仅扩充只读诊断。
+
+提交前重新通过当前 client 签名/调用关系静态核验、28项上下文断言、观察函数透传/嵌套/异常恢复回归，以及 Release x64 构建和 `git diff --check`。用户实测针对此前部署的同一播放逻辑，新增音量提示经过构建验证，未再自动启动游戏。提交仅包含本次 MVP 源码与本节记录，之前未提交的队友武器声音调查、诊断目录、测试产物和本地分析库保留在工作区。

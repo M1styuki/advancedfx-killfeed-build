@@ -2,6 +2,7 @@
 #include "AfxBuildInfo.h"
 #include "ClientEntitySystem.h"
 #include "MirvPovCore.h"
+#include "MirvPovMvpMusic.h"
 #include "MirvPovBuyMenu.h"
 #include "MirvPovKillReward.h"
 #include "MirvPovRadar.h"
@@ -231,7 +232,12 @@ CON_COMMAND(mirv_pov_teamid_debug, "Enable rate-limited mirv_pov TeamID diagnost
     advancedfx::Message("Usage: mirv_pov_teamid_debug <0|1>\n");
 }
 
-CON_COMMAND(mirv_pov_debug_feature, "Configure a mirv_pov feature. deafen applies immediately; other features apply on the next enable cycle.")
+CON_COMMAND(mirv_pov_mvp_music_status, "Print MVP music context and event diagnostic counters.")
+{
+    MirvPovMvpMusic_PrintStatus();
+}
+
+CON_COMMAND(mirv_pov_debug_feature, "Configure a mirv_pov feature. Features marked immediate apply now; others apply on the next enable cycle.")
 {
     const int argc = args->ArgC();
     if(1 == argc) {
@@ -272,8 +278,8 @@ CON_COMMAND(mirv_pov_debug_feature, "Configure a mirv_pov feature. deafen applie
 
     advancedfx::Message(
         "Usage: mirv_pov_debug_feature <feature|all> <0|1>\n"
-        "deafen applies immediately; existing audio decays naturally.\n"
-        "Other changes made while enabled apply after mirv_pov 0, then mirv_pov 1.\n");
+        "Features marked immediate apply now; mvp_music affects subsequent MVP events.\n"
+        "Existing audio finishes naturally. Other changes apply after mirv_pov 0, then mirv_pov 1.\n");
     MirvPovDebug_PrintFeatureStates();
 }
 

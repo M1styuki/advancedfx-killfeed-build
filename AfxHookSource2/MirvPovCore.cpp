@@ -60,6 +60,7 @@ MirvPovDebugFeatureState g_MirvPovDebugFeatures[] = {
     {"scoreboard", true, true},
     {"feedback", true, true},
     {"deafen", true, true, true},
+    {"mvp_music", true, true, true},
     {"damage_direction", true, true, true},
     {"deathpanel_slide", true, true, true},
     {"death_screen", true, true, true},

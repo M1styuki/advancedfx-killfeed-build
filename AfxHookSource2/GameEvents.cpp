@@ -15,6 +15,7 @@
 #include "DeathMsg.h"
 #include "MirvPovDeathPanel.h"
 #include "MirvPovCore.h"
+#include "MirvPovMvpMusic.h"
 #include "MirvPovKillReward.h"
 #include "MirvPovRadio.h"
 #include "RenderSystemDX11Hooks.h"
@@ -191,7 +192,17 @@ bool New_CGameEventManager_FireEventClientSide( void * This, SOURCESDK::CS2::CGa
         reapplyDeathPanelAfterDispatch = false;
     }
 
-    bool result = g_Old_CGameEventManager_FireEventClientSide(This, event);
+    MirvPovMvpMusicTrace mvpTrace;
+    MirvPovMvpMusic_BeginTrace(event, mvpTrace);
+    const uint32_t previousMvpPawn = MirvPovMvpMusic_PushEvent(event);
+    bool result = false;
+    __try {
+        result = g_Old_CGameEventManager_FireEventClientSide(This, event);
+    } __finally {
+        // Native dispatch owns/recycles event. Restore only our saved context.
+        MirvPovMvpMusic_PopEvent(previousMvpPawn);
+        MirvPovMvpMusic_EndTrace(mvpTrace);
+    }
     if(reapplyDeathPanelAfterDispatch) {
         MirvPovDeathPanel_Reapply("FireEventClientSide-after-dispatch");
     }

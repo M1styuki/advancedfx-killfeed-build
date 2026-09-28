@@ -27,6 +27,7 @@
 #include "MirvPovHud.h"
 #include "MirvPovFeedback.h"
 #include "MirvPovCore.h"
+#include "MirvPovMvpMusic.h"
 #include "MirvTime.h"
 
 #include "addresses.h"
@@ -1060,6 +1061,7 @@ static CEntityInstance * __fastcall DeathPanel_GetLocalPawn(int slot)
 		return g_MirvPovDeathPanelLocalPawnOverride;
 	}
     if(0 == slot || -1 == slot) {
+        if(auto pawn = MirvPovMvpMusic_GetLocalPawn(caller)) return pawn;
         if(auto pawn = MirvPovDeathCam_GetEffectPawn(caller)) return pawn;
         if(auto pawn = MirvPovDeathPanel_GetAnimationPawn(caller)) return pawn;
     }
@@ -2225,6 +2227,8 @@ void HookDeathMsg(HMODULE clientDll) {
 	if (g_MirvDeathMsgGlobals.hooked) return;
 
     MirvPovDeathPanel_ResolveAddresses(clientDll);
+    MirvPovMvpMusic_ResolveAddresses(clientDll,
+        reinterpret_cast<const void *>(g_MirvPovDeathPanelState.originalGetLocalPawn));
     g_Original_getLocalSteamId = reinterpret_cast<g_Original_getLocalSteamId_t>(
         MirvPovDeathPanel_ResolveEntityTokenAddress(clientDll));
     if (nullptr == g_MirvPovDeathPanelState.originalHandlePlayerDeath) {
