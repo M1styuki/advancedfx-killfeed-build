@@ -251,7 +251,7 @@ static bool MirvPov_ResolveVoiceHud(HMODULE clientDll) {
         if(matchAddr) g_MirvPovShowSpeakerRetAddr = matchAddr + 0x22;
     }
     if(!g_MirvPovServerVoiceDataAddr) {
-        g_MirvPovServerVoiceDataAddr = getAddress(clientDll, "48 89 4C 24 08 53 56 57 41 54 41 55 41 57 48 81 EC C8 00 00 00 44 8B 42 40 33 FF");
+        g_MirvPovServerVoiceDataAddr = getAddress(clientDll, "48 89 4C 24 08 55 53 57 41 54 41 55 41 56 48 8D 6C 24 D1 48 81 EC C8 00 00 00 44 8B 42 40 45 33 F6 41 8B C0 48 8B DA C1 E8 08");
     }
     if(!g_MirvPovVoiceStatusGetAddr) {
         g_MirvPovVoiceStatusGetAddr = getAddress(clientDll, "48 8B 05 ?? ?? ?? ?? C3 CC CC CC CC CC CC CC CC 48 8D 05");

@@ -717,3 +717,47 @@ POV 行为：继续尊重原生音乐总音量，不自动将其改成1，也不
 最终实现保留已验证的原生事件调用链、获奖者音乐盒选择、共享 getter 外层 caller 兼容、嵌套上下文恢复、独立 `mvp_music` 即时开关及原生静音条件。`mirv_pov_mvp_music_status` 和每次 MVP 的音量输出补齐 `snd_musicvolume`、`snd_gain`，音乐总音量为0时明确解释原因；仅查询，不改用户设置。音量行反映查询时的当前值，最近事件计数反映保存的事件快照。播放链版本标识仍为 `20260927-4`，本次整理仅扩充只读诊断。
 
 提交前重新通过当前 client 签名/调用关系静态核验、28项上下文断言、观察函数透传/嵌套/异常恢复回归，以及 Release x64 构建和 `git diff --check`。用户实测针对此前部署的同一播放逻辑，新增音量提示经过构建验证，未再自动启动游戏。提交仅包含本次 MVP 源码与本节记录，之前未提交的队友武器声音调查、诊断目录、测试产物和本地分析库保留在工作区。
+
+## 2026-10-03：CS2 更新后的闪光、玩家语音、购买菜单和拾取提示适配
+
+### 构建身份和证据
+
+安装 client.dll SHA-256：`d7db25d48f1d10c5e0b0296e20ed803426eb9509da41760daeda39dd35ba89b9`，PE image base `0x180000000`，image size `0x2998000`；下列 analysis VA 均为 base + RVA。本次记录不重新验证历史构建地址。独立输入、manifest、IDA 数据库及 finalize 状态位于 `diagnostics/client-dll-analysis/d7db25d48f1d10c5/`。IDA baseline 为 106937 functions / 66343 strings；open/save 前台调用各在300秒超时，worker随后完成分析，warmup/survey成功，目标 `client.i64` 已落盘且 finalize成功。只对下列局部函数进行语义分析，不表示所有函数均已手工核验。
+
+离线 Capstone/PE 指令与 unwind 比较用于定位，IDA反编译和字符串注册引用用于身份核验。`diagnostics/pov-update-20261003/` 保存 `probe.py`、`mappings.json`、`native-evidence.json`、`verify.py`、`static-audit.json`、构建和安装证据。`native-evidence.json` 中 `0xDB1550` 的反编译是被排除的初始候选，不是真正的 BuyMenu creator；最终身份以注册函数和静态断言为准。
+
+### 游戏原生行为
+
+- 闪光两个渲染路径仍调用同一 bool predicate：compact call `0x11C856B`、return `0x11C8570`；per-view call `0x11DD3E5`、return `0x11DD3EA`；target `0xCE1EB0`（VA `0x180CE1EB0`）。per-view 后续 LEA 从旧结构成员 `+0x368` 变为 `+0x1398`，因此旧完整签名失效。该字段并非 POV 直接读取的状态。原生 predicate 保留 controller/pawn、观察状态和原生条件判断，POV只对这两个 caller 改返回结果。
+- ServerVoiceData 入口 `0xB46740`（VA `0x180B46740`）重新分配寄存器/栈，并新增采样率白名单（8000/16000/24000/44100/48000/96000）。仍从 message+`0x40` 的 has-bits 先检查 `0x100`，取 entity index+`0x6C`；否则检查 `0x80` 并取 legacy slot+`0x68`，转换为一基 entity index后校验，再处理语音包。POV继续完整透传原始消息、返回值和原生解码/播放条件，不绕过采样率校验。
+- 原生 BuyMenu open → refresh/full refresh → think/select/model → close 的 ABI及主要菜单字段保持。schema descriptor `0x2234960`、字符串 `0x1C813B8` 明确给出 `m_bIsBuyMenuOpen=0x15EA`；inventory/weapon/item services descriptors `0x221B460/0x21F2030/0x21F2050` 分别为 `0x820/0x12F0/0x12F8`。旧 RVA、globals 和 class symbols 已迁移，完整哈希保护仍必要。
+- `EventOpenBuyMenu` 字符串 VA `0x181CB0D40` 唯一代码引用在 `0x1800FE495`，注册函数 RVA `0xFE480` 注册 symbol `0x223D624`、creator `0xDB0100` 和 callback `0xD9FE20`。creator分配32 bytes、写同一symbol并使用UI engine weak-handle getter slot33。与旧creator同形的 `0xDB1550` 使用不同symbol `0x223D750`，不能靠归一化形状选用。
+- model `0xDBE380` 仍以 `(menu,item)` 调用、使用 menu+`0x208` preview，在 `0xDBE39E` 调 local pawn getter。新增本地库存槽41（立即数`0x29`）的有效item检查与preview vtable+`0x360`提交，处于模型/武器装备之后、原有槽57路径之前；本次保留该原生路径，不假定其所有 cosmetic 显示已符合观察目标。pawn model getter ABI及 SetPlayerModel ABI保持，现有模型替换仍作用于同一preview。
+- 拾取提示 active builder 入口 `0xEB0180`；caller函数 `0xEAB6E0` 的 call `0xEAB78A -> 0xEB0180`，return `0xEAB78F`，caller以RCX=HUD、RDX=hint buffer传入。寄存器和栈布局改变，双参数 char返回ABI保持。
+
+### BuyMenu 当前 RVA 表
+
+| 用途 | 当前 RVA | 接入方式 |
+| --- | --- | --- |
+| open / close | `0xDB54D0 / 0xD9E740` | detour |
+| refresh / full refresh | `0xDB8820 / 0xDB88C0` | detour |
+| hover / think | `0xDBFB70 / 0xDA6A90` | detour；hover名称不等同真实mouseover |
+| local pawn / controller | `0x96AAD0 / 0x96AA90` | scope内detour |
+| loadout / hover loadout | `0x904330 / 0x904290` | scope内detour |
+| buy bit / purchase / sell | `0xC94420 / 0xDA79A0 / 0xDA7CE0` | detour |
+| model / select / SetPlayerModel | `0xDBE380 / 0xDB4D70 / 0xE5C3B0` | detour |
+| EventOpenBuyMenu creator | `0xDB0100` | 未hook，仅调用 |
+| symbol / item lookup / pawn model | `0x1782790 / 0x1130C10 / 0x21C620` | 未hook，仅调用 |
+| inventory manager / default loadout | `0x839F00 / 0x83CAB0` | 未hook，仅调用；manager为8-byte leaf |
+| acquire / owned weapon | `0x8C0F30 / 0x8FF2C0` | 未hook，状态诊断helper |
+| UI engine / cant-afford / cant-buy / promoted ref | `0x272EE40 / 0x25C3704 / 0x25C3708 / 0x2528E20` | 原生globals；RIP引用核验 |
+
+### POV 实现和验证边界
+
+`MirvPovHud.cpp::MirvPovHud_ResolveFlashContexts` 将未被POV读取的per-view成员位移设为通配，并增加后续MOVUPS指令限定；新旧三个保存的client构建均唯一匹配，运行时仍要求两个E8指向同一predicate。`MirvPovVoice.cpp::MirvPov_ResolveVoiceHud` 更新ServerVoiceData入口签名（完整字节见源码与static-audit）。`MirvPovBuyMenu.cpp` 更新完整hash及上表全部入口/global，保留schema `0x15EA`检查和未知构建拒绝安装；库存/购买隔离、状态清理和共享getter caller传递保持。`MirvPovPickupPrompt.cpp::MirvPovPickupPrompt_Initialize` 更新active builder/caller唯一签名，原有E8目标一致性检查和相对call thunk保持。
+
+无新增用户可见效果。沿用既有Release独立开关 `voice`、`pickupprompt`、`buymenu`、`buymenu_promo_hide`、`buymenu_layout`（`mirv_pov_debug_feature <name> 0|1`），以及默认关闭的 `mirv_pov_buymenu 0|1`；本次没有修改其默认值、关闭恢复、seek/换图/目标切换清理和主POV开关关系，也没有把闪光开关从原有hud作用域拆出。
+
+专项静态断言通过：完整hash/schema、20组归一化一致函数、8-byte leaf、creator注册身份、语音字段、闪光共同target；82条POV源码签名在当前安装模块扫描均有匹配（该总扫描不等同每个模块所有语义均完成验证）。拾取active caller唯一匹配且rel32指向新builder。item refresh原生指令语义保持、CanAcquire只有jump-table布局迁移；model新增slot41原生逻辑保留，仍需观察实际preview。Release x64构建成功，`git diff --check`通过。首轮构建因进程环境同时含PATH/Path而失败；仅在构建子进程环境去重后成功，没有更改系统环境。
+
+确认CS2未运行、HLAE启动器未加载目标DLL后，备份并安装到 `D:\Edu\Python\CS_AutoHighlight\tools\hlae\x64\AfxHookSource2.dll`；备份后缀 `.backup-20261003-152249-client-update`，旧hash `3F76FEC1DAFBDE97020659E343D69B618D4B68D8A687AEB9B476D59F15AF93D4`，新构建/安装hash均为 `E8B722FADCC3373DDC4150C959F08125B967F2A10FE0DE16BD7A8B59C040DF3C`。未启动、关闭或重启CS2/HLAE，未提交/推送。尚未完成游戏内闪光/玩家语音、BuyMenu开关矩阵、preview或拾取提示回放验证；安装hash一致不能替代实际加载模块和游戏行为证据。
