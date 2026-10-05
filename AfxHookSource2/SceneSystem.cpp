@@ -5,6 +5,7 @@
 #include "SchemaSystem.h"
 #include "MirvColors.h"
 #include "StreamSettings.h"
+#include "MirvWeather.h"
 
 #include "../shared/StringTools.h"
 #include "../deps/release/Detours/src/detours.h"
@@ -941,6 +942,7 @@ static SceneObjectDrawPolicy GetSceneDataPolicy(SceneObjectFilterClass filterCla
 
 std::shared_timed_mutex g_BlockedSoftwareCommandListsMutex;
 std::set<void *> g_BlockedSoftwareCommandLists;
+std::atomic<void *> g_BeforeUi_SoftwareCommandLists;
 
 void ClearThreadSceneLayerContexts(){
 	if(g_bSceneFilterSystemActive) {
@@ -1009,10 +1011,16 @@ void CheckAndDo_Untoggle_BlockColorDepth(void * pThisSoftwareCommandList) {
 	}
 }
 
+void QueueCallbackBeforeUi(void* pCRenderContextDx11_SoftwareCommandList, int value);
+
 typedef void * (__fastcall * SoftwareCommandList_Commit_t)(void * pThisSoftwareCommandList);
 SoftwareCommandList_Commit_t org_SoftwareCommandList_Commit = nullptr;
 void * __fastcall new_SoftwareCommandList_Commit(void * pThisSoftwareCommandList) {
 	CheckAndDo_Untoggle_BlockColorDepth(pThisSoftwareCommandList);
+	if(pThisSoftwareCommandList == g_BeforeUi_SoftwareCommandLists) {
+		g_BeforeUi_SoftwareCommandLists = nullptr;
+		QueueCallbackBeforeUi(pThisSoftwareCommandList, 0);
+	}
 	return org_SoftwareCommandList_Commit(pThisSoftwareCommandList);
 }
 
@@ -1035,23 +1043,36 @@ InitDrawingData_t org_InitDrawingData = nullptr;
 void __fastcall new_InitDrawingData(unsigned char * pDrawingData,void *pSceneView,void *pSceneLayer,uint32_t unkFlags4,const char *pszNameSuffix) {
 	org_InitDrawingData(pDrawingData,pSceneView,pSceneLayer,unkFlags4,pszNameSuffix);
 
-	if(g_bSceneFilterSystemActive && pDrawingData) {
-		void * pCRenderContextDx11_SoftwareCommandList = ((void **)pDrawingData)[4];
-		CheckAndDo_Untoggle_BlockColorDepth(pCRenderContextDx11_SoftwareCommandList);
-		if(org_SoftwareCommandList_Commit == nullptr) {
-			void** vtable = *(void***)pCRenderContextDx11_SoftwareCommandList;
-			org_SoftwareCommandList_Commit = (SoftwareCommandList_Commit_t)vtable[11];
+	void * pCRenderContextDx11_SoftwareCommandList = ((void **)pDrawingData)[4];
 
-			DetourTransactionBegin();
-			DetourUpdateThread(GetCurrentThread());
+	if(org_SoftwareCommandList_Commit == nullptr) {
+		void** vtable = *(void***)pCRenderContextDx11_SoftwareCommandList;
+		org_SoftwareCommandList_Commit = (SoftwareCommandList_Commit_t)vtable[11];
 
-			DetourAttach(&(PVOID&)org_SoftwareCommandList_Commit, new_SoftwareCommandList_Commit);
+		DetourTransactionBegin();
+		DetourUpdateThread(GetCurrentThread());
 
-			if(NO_ERROR != DetourTransactionCommit()) {
-				ErrorBox("Failed to detour SoftwareCommandList::Commit.");
-				return;
-			}				
+		DetourAttach(&(PVOID&)org_SoftwareCommandList_Commit, new_SoftwareCommandList_Commit);
+
+		if(NO_ERROR != DetourTransactionCommit()) {
+			ErrorBox("Failed to detour SoftwareCommandList::Commit.");
+			return;
 		}
+	}
+
+	SceneLayerContext context;
+	SetContextFromDrawingData(context, pDrawingData);
+
+	if(0 == strcmp("Player 0", context.ViewName)) {
+		if(0 == strcmp("PostProcessing", context.ViewPass)) g_BeforeUi_SoftwareCommandLists = pCRenderContextDx11_SoftwareCommandList;
+		else if(0 == strcmp("Legacy Sniper Scope", context.ViewPass)) {
+			QueueCallbackBeforeUi(pCRenderContextDx11_SoftwareCommandList, -1); // abort, let render scope first.
+			g_BeforeUi_SoftwareCommandLists = pCRenderContextDx11_SoftwareCommandList;
+		}
+	}
+
+	if(g_bSceneFilterSystemActive && pDrawingData) {
+		CheckAndDo_Untoggle_BlockColorDepth(pCRenderContextDx11_SoftwareCommandList);
 
 		/*void** pSceneViewVtable = *(void***)pSceneView;
 		SceneLayerContext context;
@@ -1063,9 +1084,6 @@ void __fastcall new_InitDrawingData(unsigned char * pDrawingData,void *pSceneVie
 			auto result = g_RenderParam4ToSceneLayerContexts.emplace(pDrawingData, context);
 			if(!result.second) result.first->second = context;
 		}*/
-
-		SceneLayerContext context;
-		SetContextFromDrawingData(context, pDrawingData);
 
 		if(0 < g_iSceneFilterDebug) {
 			advancedfx::Message("AFXDEBUG: InitDrawingData layer=%s:%s flags=0x%08x unkFlags4=0x%08x\n",
@@ -1092,6 +1110,28 @@ DrawSceneData_t org_DrawSceneData = nullptr;
 
 typedef void (__fastcall * DrawCurrentPrimitives_t)(void * pDrawingData);
 DrawCurrentPrimitives_t org_DrawCurrentPrimitives = nullptr;
+
+void DrawWeatherSceneData(void * drawingData, CBaseSceneData * sceneData) {
+	if(!MirvWeather_HasGroundOverride()) { org_DrawSceneData(drawingData, sceneData); return; }
+	bool worldLayout = false;
+	if(sceneData && sceneData->sceneObject && g_SceneObject_pSceneObjectDesc_Offset != size_t(-1)) {
+		if(void * desc = *(void **)((unsigned char *)sceneData->sceneObject + g_SceneObject_pSceneObjectDesc_Offset)) {
+			auto it = g_VtableToSceneObjectFilterClass.find(*(void ***)desc);
+			worldLayout = it != g_VtableToSceneObjectFilterClass.end()
+				&& (it->second == SceneObjectFilterClass::Base || it->second == SceneObjectFilterClass::Aggregate);
+		}
+	}
+	CMaterial2 * wet = worldLayout ? MirvWeather_Material(sceneData->material) : nullptr;
+	if(sceneData && wet && wet != sceneData->material && drawingData && org_DrawCurrentPrimitives) {
+		// Flush before and after the changed material. Use a private copy: do not
+		// mutate the map's scene record or retain a stack record in a queued batch.
+		org_DrawCurrentPrimitives(drawingData);
+		CBaseSceneData copy = *sceneData;
+		copy.material = wet;
+		org_DrawSceneData(drawingData, &copy);
+		org_DrawCurrentPrimitives(drawingData);
+	} else org_DrawSceneData(drawingData, sceneData);
+}
 
 void __fastcall new_DrawSceneData(void * pDrawingData, CBaseSceneData* pSceneData) {
 
@@ -1128,7 +1168,7 @@ void __fastcall new_DrawSceneData(void * pDrawingData, CBaseSceneData* pSceneDat
 			BlockColorDepth(pCRenderContextDx11_SoftwareCommandList, true, true);
 			break;
 		}
-		org_DrawSceneData(pDrawingData, pSceneData);
+		DrawWeatherSceneData(pDrawingData, pSceneData);
 		org_DrawCurrentPrimitives(pDrawingData); // Force draw to prevent merging and get correct state.
 		switch (policy) {
 		default:
@@ -1142,7 +1182,7 @@ void __fastcall new_DrawSceneData(void * pDrawingData, CBaseSceneData* pSceneDat
 		return;
 	}
 
-	org_DrawSceneData(pDrawingData, pSceneData);
+	DrawWeatherSceneData(pDrawingData, pSceneData);
 }
 
 /*

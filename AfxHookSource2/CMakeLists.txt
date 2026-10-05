@@ -240,8 +240,12 @@ target_sources(${PROJECT_NAME} PRIVATE
     ClientEntitySystem.cpp
     ClientEntitySystem.h
 
+    MirvWeather.cpp
+    MirvWeather.h
     MirvPovCore.cpp
     MirvPovCore.h
+    MirvPovMvpMusic.cpp
+    MirvPovMvpMusic.h
     MirvPovBuyMenu.cpp
     MirvPovBuyMenu.h
 
