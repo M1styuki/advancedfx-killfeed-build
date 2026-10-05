@@ -1112,6 +1112,7 @@ typedef void (__fastcall * DrawCurrentPrimitives_t)(void * pDrawingData);
 DrawCurrentPrimitives_t org_DrawCurrentPrimitives = nullptr;
 
 void DrawWeatherSceneData(void * drawingData, CBaseSceneData * sceneData) {
+	if(!MirvWeather_HasGroundOverride()) { org_DrawSceneData(drawingData, sceneData); return; }
 	bool worldLayout = false;
 	if(sceneData && sceneData->sceneObject && g_SceneObject_pSceneObjectDesc_Offset != size_t(-1)) {
 		if(void * desc = *(void **)((unsigned char *)sceneData->sceneObject + g_SceneObject_pSceneObjectDesc_Offset)) {

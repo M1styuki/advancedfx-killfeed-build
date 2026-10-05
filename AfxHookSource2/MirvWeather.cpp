@@ -150,7 +150,7 @@ void LoadMaterials() {
     std::unordered_map<std::string, CMaterial2 *> loaded;
     for(const auto & e : materialEntries) {
         auto ** material = g_pCResourceSystem->PreCache(e.wet.c_str());
-        if(!material || !*material || Normalize((*material)->GetName()) != Normalize(e.wet)) {
+        if(!material || !*material || !(*material)->GetName() || Normalize((*material)->GetName()) != Normalize(e.wet)) {
             advancedfx::Warning("[mirv_weather] Wet material could not be loaded: %s\n", e.wet.c_str());
             return;
         }
@@ -277,6 +277,8 @@ void MirvWeather_Frame() {
     groundActive.store(wantGround && groundReady && MirvPovDebug_IsFeatureEnabled("weather_ground"));
     if(wantPost && MirvPovDebug_IsFeatureEnabled("weather_postprocess")) ApplyPost(); else RestorePost();
 }
+
+bool MirvWeather_HasGroundOverride() { return groundActive.load(); }
 
 CMaterial2 * MirvWeather_Material(CMaterial2 * original) {
     if(!original || !groundActive.load()) return original;
