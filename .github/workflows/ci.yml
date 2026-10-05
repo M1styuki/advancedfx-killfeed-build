@@ -97,7 +97,8 @@ jobs:
 
           $sourceRoot = Join-Path $env:RUNNER_TEMP "AfxHookSource2-$shortSha-source"
           New-Item -ItemType Directory -Force -Path $sourceRoot | Out-Null
-          git ls-files --recurse-submodules | ForEach-Object {
+          # Diagnostic history is not required corresponding source and may contain local paths.
+          git ls-files --recurse-submodules | Where-Object { $_ -ne 'doc/notes/cs2-pov-native-logic.md' } | ForEach-Object {
             $sourcePath = Join-Path $env:GITHUB_WORKSPACE $_
             if (Test-Path -LiteralPath $sourcePath -PathType Leaf) {
               $destination = Join-Path $sourceRoot $_
@@ -151,8 +152,18 @@ jobs:
           notes_file="${RUNNER_TEMP}/prerelease-notes.md"
 
           {
-            printf '## Download\n\n'
-            printf 'Download `%s`, extract it, and use the `AfxHookSource2.dll` file inside.\n\n' "$binary_archive"
+            printf '## How to use\n\n'
+            printf '1. Download **`%s`** from this release. The `*-source.zip` and GitHub-generated source archives are for source code, not installation.\n\n' "$binary_archive"
+            printf '%s\n\n' \
+              '2. Install a complete, compatible [official HLAE](https://github.com/advancedfx/advancedfx/releases) first (prefer the upstream version used by this build). This prerelease is a DLL replacement, not a complete HLAE distribution.' \
+              '3. Close CS2. Back up `<HLAE>/x64/AfxHookSource2.dll`, then extract this binary ZIP into `<HLAE>/x64/` and replace that DLL. The final path must be `<HLAE>/x64/AfxHookSource2.dll`, not a nested archive folder. Keep the bundled license files; do not extract into the CS2 game directory. Preserve the rest of the HLAE installation, including `resources/AfxHookSource2/snippets/mirv_script_voice.js`.' \
+              '4. Launch CS2 through HLAE, play a local demo, switch to the player you want to observe in first person, and enter these console commands:'
+            printf '%s\n' '```text' 'mirv_pov 1' 'mirv_pov_buymenu 1' 'mirv_pov_scoreboard 1' '```'
+            printf '\n%s\n\n' \
+              '`mirv_pov 1` is the main switch (`mirv_pov 0` disables it). Buy-menu and scoreboard replay are optional and disabled by default; the last two commands enable them. They follow recorded demo state, not a real purchase.' \
+              'Independent effects: run `mirv_pov_debug_feature` to list states, then `mirv_pov_debug_feature <feature> 0` to disable one (`1` to restore). Non-immediate changes require `mirv_pov 0` followed by `mirv_pov 1`. For player voice routing, use `mirv_pov_voice team|all|enemy|off` (choose one mode; default: `team`).' \
+              '**Safety / compatibility:** use only for offline demo playback and video creation, never join VAC-protected servers with HLAE. CS2 updates can break hooks; an unsupported-build warning is not a reason to bypass compatibility checks. Fast-changing images may affect photosensitive users.'
+            printf 'See the [POV feature and switch guide](https://github.com/%s/blob/%s/README.md) for defaults, dependencies and troubleshooting.\n\n' "$GITHUB_REPOSITORY" "$GITHUB_SHA"
             printf '## Commit\n\n'
             printf '[`%s`](https://github.com/%s/commit/%s)\n\n' "$GITHUB_SHA" "$GITHUB_REPOSITORY" "$GITHUB_SHA"
             printf '### Commit message\n\n'
@@ -205,3 +216,63 @@ jobs:
               --latest=true \
               --generate-notes
           fi
+
+  publish_weather_contact:
+    name: Publish Dust2 rain-contact test package
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'feat/dust2-command-weather' }}
+    needs: build
+    runs-on: windows-2022
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: AfxHookSource2-${{ github.sha }}
+          path: artifacts
+      - name: Assemble DLL with corresponding source and licensed weather data
+        shell: pwsh
+        run: |
+          $shortSha = $env:GITHUB_SHA.Substring(0, 12)
+          $binary = "artifacts/AfxHookSource2-$shortSha-windows-x64.zip"
+          $source = "artifacts/AfxHookSource2-$shortSha-source.zip"
+          if (!(Test-Path -LiteralPath $binary) -or !(Test-Path -LiteralPath $source)) { throw 'Missing corresponding binary/source archives' }
+          New-Item -ItemType Directory -Path stage/x64,release -Force | Out-Null
+          Expand-Archive -LiteralPath $binary -DestinationPath stage/x64
+          Expand-Archive -LiteralPath delivery/dust2-weather-resources.zip -DestinationPath stage
+          Copy-Item -LiteralPath doc/notes/dust2-rain-contact-user-guide.txt -Destination stage/使用说明.txt
+          @(
+            "DLL/source build commit: $env:GITHUB_SHA"
+            "Build run: https://github.com/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+            'Build: Windows Release x64 success'
+            'CS2: 1.41.8.8 / source revision 11076591'
+            'Game visual acceptance: pending'
+            ('DLL SHA256: ' + (Get-FileHash -LiteralPath stage/x64/AfxHookSource2.dll -Algorithm SHA256).Hash)
+          ) | Set-Content -LiteralPath stage/BUILD-INFO.txt -Encoding utf8
+          Compress-Archive -Path stage/* -DestinationPath "release/Dust2-weather-contact-$shortSha-test.zip"
+          Copy-Item -LiteralPath $source -Destination release
+      - name: Publish matching test DLL and source
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $shortSha = $env:GITHUB_SHA.Substring(0, 12)
+          $tag = "dust2-weather-contact-$shortSha"
+          @(
+            'Restore the omitted native dynamic-object rain contact from the reference Dust2 profile. Keep one airborne rain source and authored wet ground; preserve native rain/wetness/drying values. Fix caching of optional weather schema before its temporary table is cleared.'
+            ''
+            'Use a complete official HLAE 2.192.6 installation. Download the Dust2-weather-contact test ZIP for the replacement DLL, separate weather data and Chinese instructions. It does not replace game maps or require a separate launcher.'
+            ''
+            "DLL and complete corresponding source commit: $env:GITHUB_SHA. Windows Release x64 build passed; in-game weapons/gloves, indoor/outdoor, restore/seek and recording acceptance is pending."
+            ''
+            'DLL software retains its licenses; weather data is separately licensed under PolyForm Noncommercial 1.0.0 with notices and provenance included.'
+          ) | Set-Content -LiteralPath notes.txt -Encoding utf8
+          $assets = Get-ChildItem -LiteralPath release -Filter '*.zip' | ForEach-Object { $_.FullName }
+          gh release view $tag --repo $env:GITHUB_REPOSITORY 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag @assets --repo $env:GITHUB_REPOSITORY --clobber
+          } else {
+            gh release create $tag @assets --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title "Dust2 native rain contact test - $shortSha" --notes-file notes.txt --prerelease --latest=false
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'Release publication failed' }
