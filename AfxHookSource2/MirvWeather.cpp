@@ -34,10 +34,24 @@ CreateFn createFn = nullptr;
 UpdateFn updateFn = nullptr;
 DestroyFn destroyFn = nullptr;
 ptrdiff_t postSettingsOffset = -1;
-bool requested = false, wantRain = true, wantGround = true, wantPost = true;
+using WorldFn = void * (__fastcall *)(void *, uint32_t);
+using RainContactFn = void (__fastcall *)(void *, void *, bool);
+WorldFn worldFn = nullptr;
+void ** contactSceneAddress = nullptr, ** contactWorldAddress = nullptr;
+ptrdiff_t identityOffset = -1, worldGroupOffset = -1, rainContactOffset = -1;
+bool contactSchemaReady = false, contactWarning = false, postSchemaWarning = false;
+struct ContactState {
+    SOURCESDK::CS2::CBaseHandle handle;
+    uint32_t worldGroup;
+    void * scene;
+    void * world;
+    bool original;
+};
+std::vector<ContactState> contactStates;
+bool requested = false, wantRain = true, wantGround = true, wantPost = true, wantContact = true;
 bool configLoaded = false, loadAttempted = false, rainAttempted = false;
 bool groundReady = false, postReady = false;
-bool groundLoadAttempted = false, postLoadAttempted = false, schemaAttempted = false;
+bool groundLoadAttempted = false, postLoadAttempted = false;
 std::atomic<bool> groundActive { false };
 std::shared_mutex materialMutex;
 std::unordered_map<std::string, CMaterial2 *> wetMaterials;
@@ -104,6 +118,85 @@ void RestorePost() {
         }
     }
     postBackups.clear();
+}
+
+bool ReadContact(CEntityInstance * entity, uint32_t & group, bool & enabled) {
+    if(!entity || !contactSchemaReady) return false;
+    auto * bytes = reinterpret_cast<unsigned char *>(entity);
+    auto * identity = *reinterpret_cast<unsigned char **>(bytes + identityOffset);
+    if(!identity) return false;
+    group = *reinterpret_cast<uint32_t *>(identity + worldGroupOffset);
+    enabled = *reinterpret_cast<bool *>(bytes + rainContactOffset);
+    return true;
+}
+
+bool ResolveContact(uint32_t group, void *& scene, void *& world) {
+    if(!worldFn || !contactSceneAddress || !contactWorldAddress) return false;
+    scene = *contactSceneAddress;
+    if(!scene || !*contactWorldAddress) return false;
+    world = worldFn(*contactWorldAddress, group);
+    return world != nullptr;
+}
+
+void PublishContact(void * scene, void * world, bool enabled) {
+    // CMapInfo uses this same scene-world setter when its authored map data is
+    // loaded. Do not call its entire initializer or add another rainfall source.
+    auto ** vtable = *reinterpret_cast<void ***>(scene);
+    auto setter = reinterpret_cast<RainContactFn>(vtable[0x1b8 / sizeof(void *)]);
+    setter(scene, world, enabled);
+}
+
+void RestoreContact() {
+    if(!g_pEntityList || !*g_pEntityList || !g_GetEntityFromIndex) {
+        // Level teardown owns the destroyed scene worlds.
+        contactStates.clear();
+        return;
+    }
+    for(auto & state : contactStates) {
+        void * scene = nullptr, * world = nullptr;
+        if(!ResolveContact(state.worldGroup, scene, world) || scene != state.scene || world != state.world) continue;
+        auto * entity = GetEntityFromIndex(state.handle.GetEntryIndex());
+        if(entity && entity->GetHandle() == state.handle) {
+            uint32_t group = 0;
+            bool enabled = false;
+            if(ReadContact(entity, group, enabled) && group == state.worldGroup) state.original = enabled;
+        }
+        PublishContact(scene, world, state.original);
+    }
+    contactStates.clear();
+}
+
+void ApplyContact() {
+    if(!contactSchemaReady || !worldFn || !g_pEntityList || !*g_pEntityList
+        || !g_GetHighestEntityIndex || !g_GetEntityFromIndex) {
+        if(!contactWarning) {
+            contactWarning = true;
+            advancedfx::Warning("[mirv_weather] Native rain contact interface/schema unavailable; contact left unchanged.\n");
+        }
+        return;
+    }
+    const int highest = GetHighestEntityIndex();
+    if(highest < 0 || highest > 32768) return;
+    for(int i = 0; i <= highest; ++i) {
+        auto * entity = GetEntityFromIndex(i);
+        if(!entity) continue;
+        const char * name = entity->GetClientClassName();
+        if(!name || strcmp(name, "CMapInfo")) continue;
+        auto handle = entity->GetHandle();
+        uint32_t group = 0;
+        bool original = false;
+        void * scene = nullptr, * world = nullptr;
+        if(!handle.IsValid() || !ReadContact(entity, group, original) || !ResolveContact(group, scene, world)) continue;
+        auto it = contactStates.begin();
+        while(it != contactStates.end() && it->handle != handle) ++it;
+        if(it == contactStates.end()) {
+            if(contactStates.size() >= 32) continue;
+            contactStates.push_back({handle, group, scene, world, original});
+        } else *it = {handle, group, scene, world, original};
+        // The reference Dust2 profile changes only raintracetoskyenabled.
+        // Preserve its existing rain strength, wetness and drying parameters.
+        PublishContact(scene, world, true);
+    }
 }
 
 bool ReadConfig() {
@@ -186,10 +279,9 @@ void StartRain() {
 }
 
 void ApplyPost() {
-    if(!schemaAttempted) {
-        schemaAttempted = true;
-        getOffset(&postSettingsOffset, "client.dll", "C_PostProcessingVolume", "m_hPostSettings");
-        if(postSettingsOffset <= 0) advancedfx::Warning("[mirv_weather] Postprocessing schema unavailable; postprocessing left unchanged.\n");
+    if(postSettingsOffset <= 0 && !postSchemaWarning) {
+        postSchemaWarning = true;
+        advancedfx::Warning("[mirv_weather] Postprocessing schema unavailable; postprocessing left unchanged.\n");
     }
     if(postSettingsOffset <= 0 || !g_pCResourceSystem || !g_pEntityList || !*g_pEntityList
         || !g_GetHighestEntityIndex || !g_GetEntityFromIndex) return;
@@ -224,6 +316,9 @@ void PrintStatus() {
     advancedfx::Message("[mirv_weather] requested=%d Dust2Demo=%d pack=%d; rain=%d hosts=%zu native=%d; ground=%d materials=%zu; postprocess=%d volumes=%zu schema=%d.\n",
         requested, IsDust2Demo(), configLoaded, wantRain, rainParticles.size(), destroyFn && managerFn && createFn && updateFn,
         groundActive.load(), wetMaterials.size(), wantPost, postBackups.size(), postSettingsOffset > 0);
+    advancedfx::Message("[mirv_weather] contact requested=%d active=%d worlds=%zu interface=%d schema=%d.\n",
+        wantContact && MirvPovDebug_IsFeatureEnabled("weather_contact"), !contactStates.empty(), contactStates.size(),
+        worldFn != nullptr, contactSchemaReady);
 }
 
 size_t UniqueAddress(HMODULE dll, const char * pattern) {
@@ -242,32 +337,46 @@ void MirvWeather_Initialize(HMODULE clientDll) {
     createFn = reinterpret_cast<CreateFn>(UniqueAddress(clientDll, "4C 8B DC 53 48 81 EC ?? ?? ?? ?? F2 0F 10 05"));
     updateFn = reinterpret_cast<UpdateFn>(UniqueAddress(clientDll, "48 89 5C 24 ?? 48 89 74 24 ?? 57 48 83 EC ?? F3 0F 10 1D ?? ?? ?? ?? 41 8B F8 8B DA 4C 8D 05"));
     destroyFn = reinterpret_cast<DestroyFn>(UniqueAddress(clientDll, "83 FA FF 0F 84 ?? ?? ?? ?? 41 54 41 56 41 57 48 83 EC 40 48 89 5C 24 60 45 0F B6 E1 33 DB 48 89 74 24 38 48 8D B1 98 00 00 00 45 0F B6 F0"));
-    // The schema table is filled later during client initialization; resolve
-    // the optional volume field on the first enabled demo frame instead.
+    size_t callSite = UniqueAddress(clientDll, "48 8B 05 ?? ?? ?? ?? 48 8B 56 10 0F B6 9E 19 06 00 00 48 8B 08 8B 52 38 48 8B B9 B8 01 00 00 48 8B 0D ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 8B 0D ?? ?? ?? ?? 44 0F B6 C3 48 8B D0 FF D7");
+    if(callSite) {
+        contactSceneAddress = reinterpret_cast<void **>(callSite + 7 + *reinterpret_cast<int32_t *>(callSite + 3));
+        contactWorldAddress = reinterpret_cast<void **>(callSite + 38 + *reinterpret_cast<int32_t *>(callSite + 34));
+        worldFn = reinterpret_cast<WorldFn>(callSite + 43 + *reinterpret_cast<int32_t *>(callSite + 39));
+    }
+}
+
+void MirvWeather_ResolveSchemaOffsets() {
+    // HookSchemaSystem clears the temporary schema table after initialization.
+    // Resolve optional weather fields while that table is still populated.
+    getOffset(&postSettingsOffset, "client.dll", "C_PostProcessingVolume", "m_hPostSettings");
+    getOffset(&identityOffset, "client.dll", "CEntityInstance", "m_pEntity");
+    getOffset(&worldGroupOffset, "client.dll", "CEntityIdentity", "m_worldGroupId");
+    getOffset(&rainContactOffset, "client.dll", "CMapInfo", "m_bRainTraceToSkyEnabled");
+    // The verified native signature embeds this layout; do not guess if it changes.
+    contactSchemaReady = identityOffset == 0x10 && worldGroupOffset == 0x38 && rainContactOffset == 0x619;
 }
 
 void MirvWeather_Reset() {
     groundActive.store(false);
     StopRain();
     RestorePost();
+    RestoreContact();
     std::unique_lock<std::shared_mutex> lock(materialMutex);
     wetMaterials.clear();
     groundReady = false;
     groundLoadAttempted = postLoadAttempted = false;
     postReady = false;
-    schemaAttempted = false;
-    postSettingsOffset = -1;
     postResource = nullptr;
     previousTick = -1;
 }
 
 void MirvWeather_Frame() {
     const bool active = requested && IsDust2Demo();
-    if(!active) { if(rainAttempted || !postBackups.empty() || groundActive.load()) MirvWeather_Reset(); return; }
+    if(!active) { if(rainAttempted || !postBackups.empty() || !contactStates.empty() || groundActive.load()) MirvWeather_Reset(); return; }
     if(!ReadConfig()) return;
     const int tick = g_pEngineToClient->GetDemoFile()->GetDemoTick();
     // Avoid retaining particle state across a rewind or large demo jump.
-    if(previousTick >= 0 && (tick < previousTick || tick - previousTick > 128)) { StopRain(); RestorePost(); }
+    if(previousTick >= 0 && (tick < previousTick || tick - previousTick > 128)) { StopRain(); RestorePost(); RestoreContact(); }
     previousTick = tick;
     if(!rainParticles.empty() && (managerFn() != rainManager
         || FindRecord(rainManager, rainParticles.front().index) != rainParticles.front().record
@@ -276,6 +385,7 @@ void MirvWeather_Frame() {
     if(wantGround && MirvPovDebug_IsFeatureEnabled("weather_ground")) LoadMaterials();
     groundActive.store(wantGround && groundReady && MirvPovDebug_IsFeatureEnabled("weather_ground"));
     if(wantPost && MirvPovDebug_IsFeatureEnabled("weather_postprocess")) ApplyPost(); else RestorePost();
+    if(wantContact && MirvPovDebug_IsFeatureEnabled("weather_contact")) ApplyContact(); else RestoreContact();
 }
 
 bool MirvWeather_HasGroundOverride() { return groundActive.load(); }
@@ -289,7 +399,7 @@ CMaterial2 * MirvWeather_Material(CMaterial2 * original) {
     return it == wetMaterials.end() ? original : it->second;
 }
 
-CON_COMMAND(mirv_weather, "Dust2 demo rain, wet ground and postprocessing") {
+CON_COMMAND(mirv_weather, "Dust2 demo rain, native rain contact, wet ground and postprocessing") {
     if(args->ArgC() == 2 && (!strcmp(args->ArgV(1), "0") || !strcmp(args->ArgV(1), "1"))) {
         requested = args->ArgV(1)[0] == '1';
         if(!requested) MirvWeather_Reset();
@@ -298,13 +408,14 @@ CON_COMMAND(mirv_weather, "Dust2 demo rain, wet ground and postprocessing") {
         if(!_stricmp(args->ArgV(1), "rain")) target = &wantRain;
         if(!_stricmp(args->ArgV(1), "ground")) target = &wantGround;
         if(!_stricmp(args->ArgV(1), "postprocess")) target = &wantPost;
+        if(!_stricmp(args->ArgV(1), "contact")) target = &wantContact;
         if(target) *target = args->ArgV(2)[0] == '1';
     } else if(args->ArgC() == 2 && !_stricmp(args->ArgV(1), "reload")) {
         MirvWeather_Reset();
         configLoaded = loadAttempted = false;
         positions.clear(); materialEntries.clear();
     } else if(args->ArgC() != 2 || _stricmp(args->ArgV(1), "status")) {
-        advancedfx::Message("mirv_weather 0|1; mirv_weather rain|ground|postprocess 0|1; mirv_weather status|reload.\nWeather requires the Dust2 resource pack in HLAE resources. Sky remains controlled by mirv_sky material.\n");
+        advancedfx::Message("mirv_weather 0|1; mirv_weather rain|ground|postprocess|contact 0|1; mirv_weather status|reload.\nWeather requires the Dust2 resource pack in HLAE resources. Sky remains controlled by mirv_sky material.\n");
     }
     MirvWeather_Frame();
     PrintStatus();

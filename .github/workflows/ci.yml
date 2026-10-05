@@ -97,7 +97,8 @@ jobs:
 
           $sourceRoot = Join-Path $env:RUNNER_TEMP "AfxHookSource2-$shortSha-source"
           New-Item -ItemType Directory -Force -Path $sourceRoot | Out-Null
-          git ls-files --recurse-submodules | ForEach-Object {
+          # Diagnostic history is not required corresponding source and may contain local paths.
+          git ls-files --recurse-submodules | Where-Object { $_ -ne 'doc/notes/cs2-pov-native-logic.md' } | ForEach-Object {
             $sourcePath = Join-Path $env:GITHUB_WORKSPACE $_
             if (Test-Path -LiteralPath $sourcePath -PathType Leaf) {
               $destination = Join-Path $sourceRoot $_
@@ -215,3 +216,63 @@ jobs:
               --latest=true \
               --generate-notes
           fi
+
+  publish_weather_contact:
+    name: Publish Dust2 rain-contact test package
+    if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'feat/dust2-command-weather' }}
+    needs: build
+    runs-on: windows-2022
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: AfxHookSource2-${{ github.sha }}
+          path: artifacts
+      - name: Assemble DLL with corresponding source and licensed weather data
+        shell: pwsh
+        run: |
+          $shortSha = $env:GITHUB_SHA.Substring(0, 12)
+          $binary = "artifacts/AfxHookSource2-$shortSha-windows-x64.zip"
+          $source = "artifacts/AfxHookSource2-$shortSha-source.zip"
+          if (!(Test-Path -LiteralPath $binary) -or !(Test-Path -LiteralPath $source)) { throw 'Missing corresponding binary/source archives' }
+          New-Item -ItemType Directory -Path stage/x64,release -Force | Out-Null
+          Expand-Archive -LiteralPath $binary -DestinationPath stage/x64
+          Expand-Archive -LiteralPath delivery/dust2-weather-resources.zip -DestinationPath stage
+          Copy-Item -LiteralPath doc/notes/dust2-rain-contact-user-guide.txt -Destination stage/使用说明.txt
+          @(
+            "DLL/source build commit: $env:GITHUB_SHA"
+            "Build run: https://github.com/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
+            'Build: Windows Release x64 success'
+            'CS2: 1.41.8.8 / source revision 11076591'
+            'Game visual acceptance: pending'
+            ('DLL SHA256: ' + (Get-FileHash -LiteralPath stage/x64/AfxHookSource2.dll -Algorithm SHA256).Hash)
+          ) | Set-Content -LiteralPath stage/BUILD-INFO.txt -Encoding utf8
+          Compress-Archive -Path stage/* -DestinationPath "release/Dust2-weather-contact-$shortSha-test.zip"
+          Copy-Item -LiteralPath $source -Destination release
+      - name: Publish matching test DLL and source
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $shortSha = $env:GITHUB_SHA.Substring(0, 12)
+          $tag = "dust2-weather-contact-$shortSha"
+          @(
+            'Restore the omitted native dynamic-object rain contact from the reference Dust2 profile. Keep one airborne rain source and authored wet ground; preserve native rain/wetness/drying values. Fix caching of optional weather schema before its temporary table is cleared.'
+            ''
+            'Use a complete official HLAE 2.192.6 installation. Download the Dust2-weather-contact test ZIP for the replacement DLL, separate weather data and Chinese instructions. It does not replace game maps or require a separate launcher.'
+            ''
+            "DLL and complete corresponding source commit: $env:GITHUB_SHA. Windows Release x64 build passed; in-game weapons/gloves, indoor/outdoor, restore/seek and recording acceptance is pending."
+            ''
+            'DLL software retains its licenses; weather data is separately licensed under PolyForm Noncommercial 1.0.0 with notices and provenance included.'
+          ) | Set-Content -LiteralPath notes.txt -Encoding utf8
+          $assets = Get-ChildItem -LiteralPath release -Filter '*.zip' | ForEach-Object { $_.FullName }
+          gh release view $tag --repo $env:GITHUB_REPOSITORY 2>$null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag @assets --repo $env:GITHUB_REPOSITORY --clobber
+          } else {
+            gh release create $tag @assets --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title "Dust2 native rain contact test - $shortSha" --notes-file notes.txt --prerelease --latest=false
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'Release publication failed' }

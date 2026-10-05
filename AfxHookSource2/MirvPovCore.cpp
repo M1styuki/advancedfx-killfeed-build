@@ -62,6 +62,7 @@ MirvPovDebugFeatureState g_MirvPovDebugFeatures[] = {
     {"weather_rain", true, true, true},
     {"weather_ground", true, true, true},
     {"weather_postprocess", true, true, true},
+    {"weather_contact", true, true, true},
     {"deafen", true, true, true},
     {"mvp_music", true, true, true},
     {"damage_direction", true, true, true},

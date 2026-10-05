@@ -1,0 +1,14 @@
+# Dust2 native rain contact restoration
+## CS2 1.41.8.8: restore the reference Dust2 dynamic-object rain contact
+
+Client build/source revision: 1.41.8.8 / 11076591. Analyzed client SHA256: D7DB25D48F1D10C5E0B0296E20ED803426EB9509DA41760DAEDA39DD35BA89B9. Preferred image base: 0x180000000. Addresses below are verified only for that image.
+
+Native behavior: CMapInfo initialization at RVA 0xD2F800 publishes raintracetoskyenabled to its scene world. The unique contiguous call-site signature starts at RVA 0xD2F91A; it reads CEntityInstance.m_pEntity (+0x10), CEntityIdentity.m_worldGroupId (+0x38), and CMapInfo.m_bRainTraceToSkyEnabled (+0x619), resolves the scene world via the unhooked helper at RVA 0x3B9A40, and calls scene interface vtable +0x1B8 at RVA 0xD2F953. Scene/world interface globals resolve to RVA 0x2797E30 / 0x23B8358. The adjacent native +0x1C8 call publishes rain/ripple/direction/wetness/drying floats; this patch does not override those floats.
+
+Reference profile: CS2-insight-agent pov/weather_effects/rain/manifest.json, de_dust2.dynamic_object_rain_contact, changes raintracetoskyenabled from false to true, while env_rain_strength stays 1.0. Airborne rain remains its 385 client-only hosts and wet ground remains authored materials. The original runtime port omitted this contact publication.
+
+Implementation: MirvWeather.cpp resolves the existing helper and scene setter with a unique complete call-site signature plus matching runtime schema layout. It repeats only the boolean publication in Dust2 offline demos; it does not hook this function, invoke CMapInfo's initializer, add another rain system, edit skin materials, or mutate map entities. Current native values remain the restoration source; retained entity handles include their serial, and scene/world identity must match before restoration. Restore on master/contact disable, seek/rewind, level transition and shutdown. Signature/schema mismatch leaves native contact unchanged with a warning.
+
+Optional weather schema is now cached in MirvWeather_ResolveSchemaOffsets before HookSchemaSystem clears its transient table. In particular, postprocessing no longer attempts a lookup against that empty table on the first weather frame; level resets retain cached offsets.
+
+Release controls: mirv_weather contact 0|1 and mirv_pov_debug_feature weather_contact 0|1. Contact defaults on under the weather master (master defaults off), is independent of mirv_pov and the other weather debug effects, and updates on the next render pass. Turning contact off leaves airborne rain, ground and postprocessing controls intact. Pending in-game acceptance: off/on, re-enable, interaction with POV off/on, indoor/outdoor weapons/knives/gloves, seeking, cold start, recording and restoration. Static call-site uniqueness, current image identity and schema lifetime flow were checked; Windows Release x64 build is required before delivery. No game visual claim is implied by compilation.
