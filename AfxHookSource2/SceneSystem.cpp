@@ -5,6 +5,7 @@
 #include "SchemaSystem.h"
 #include "MirvColors.h"
 #include "StreamSettings.h"
+#include "MirvWeather.h"
 
 #include "../shared/StringTools.h"
 #include "../deps/release/Detours/src/detours.h"
@@ -1110,6 +1111,27 @@ DrawSceneData_t org_DrawSceneData = nullptr;
 typedef void (__fastcall * DrawCurrentPrimitives_t)(void * pDrawingData);
 DrawCurrentPrimitives_t org_DrawCurrentPrimitives = nullptr;
 
+void DrawWeatherSceneData(void * drawingData, CBaseSceneData * sceneData) {
+	bool worldLayout = false;
+	if(sceneData && sceneData->sceneObject && g_SceneObject_pSceneObjectDesc_Offset != size_t(-1)) {
+		if(void * desc = *(void **)((unsigned char *)sceneData->sceneObject + g_SceneObject_pSceneObjectDesc_Offset)) {
+			auto it = g_VtableToSceneObjectFilterClass.find(*(void ***)desc);
+			worldLayout = it != g_VtableToSceneObjectFilterClass.end()
+				&& (it->second == SceneObjectFilterClass::Base || it->second == SceneObjectFilterClass::Aggregate);
+		}
+	}
+	CMaterial2 * wet = worldLayout ? MirvWeather_Material(sceneData->material) : nullptr;
+	if(sceneData && wet && wet != sceneData->material && drawingData && org_DrawCurrentPrimitives) {
+		// Flush before and after the changed material. Use a private copy: do not
+		// mutate the map's scene record or retain a stack record in a queued batch.
+		org_DrawCurrentPrimitives(drawingData);
+		CBaseSceneData copy = *sceneData;
+		copy.material = wet;
+		org_DrawSceneData(drawingData, &copy);
+		org_DrawCurrentPrimitives(drawingData);
+	} else org_DrawSceneData(drawingData, sceneData);
+}
+
 void __fastcall new_DrawSceneData(void * pDrawingData, CBaseSceneData* pSceneData) {
 
 	if(g_bSceneFilterSystemActive && nullptr != pDrawingData) {
@@ -1145,7 +1167,7 @@ void __fastcall new_DrawSceneData(void * pDrawingData, CBaseSceneData* pSceneDat
 			BlockColorDepth(pCRenderContextDx11_SoftwareCommandList, true, true);
 			break;
 		}
-		org_DrawSceneData(pDrawingData, pSceneData);
+		DrawWeatherSceneData(pDrawingData, pSceneData);
 		org_DrawCurrentPrimitives(pDrawingData); // Force draw to prevent merging and get correct state.
 		switch (policy) {
 		default:
@@ -1159,7 +1181,7 @@ void __fastcall new_DrawSceneData(void * pDrawingData, CBaseSceneData* pSceneDat
 		return;
 	}
 
-	org_DrawSceneData(pDrawingData, pSceneData);
+	DrawWeatherSceneData(pDrawingData, pSceneData);
 }
 
 /*
