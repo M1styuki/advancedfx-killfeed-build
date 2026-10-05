@@ -242,6 +242,8 @@ target_sources(${PROJECT_NAME} PRIVATE
 
     MirvPovCore.cpp
     MirvPovCore.h
+    MirvPovMvpMusic.cpp
+    MirvPovMvpMusic.h
     MirvPovBuyMenu.cpp
     MirvPovBuyMenu.h
 

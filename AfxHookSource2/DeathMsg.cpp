@@ -6,6 +6,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <intrin.h>
 #include <Windows.h>
 #include "../shared/binutils.h"
 #include "../deps/release/Detours/src/detours.h"
@@ -17,6 +18,7 @@
 
 #include "DeathMsg.h"
 #include "MirvPovDeathPanel.h"
+#include "MirvPovDeathCam.h"
 #include "Globals.h"
 #include "ClientEntitySystem.h"
 #include "SchemaSystem.h"
@@ -25,6 +27,7 @@
 #include "MirvPovHud.h"
 #include "MirvPovFeedback.h"
 #include "MirvPovCore.h"
+#include "MirvPovMvpMusic.h"
 #include "MirvTime.h"
 
 #include "addresses.h"
@@ -1050,7 +1053,10 @@ static CEntityInstance * DeathPanel_ResolveEventVictimPawn(
 }
 
 static CEntityInstance * __fastcall DeathPanel_GetLocalPawn(int slot)
-		{
+{
+    void * previous = MirvPov_PushHookReturnAddress(_ReturnAddress());
+    void * caller = MirvPov_GetHookReturnAddress();
+    MirvPov_PopHookReturnAddress(previous);
 	if(nullptr != g_MirvPovDeathPanelLocalPawnOverride && (0 == slot || -1 == slot)) {
 			if(false) {
 			advancedfx::Message(
@@ -1060,9 +1066,16 @@ static CEntityInstance * __fastcall DeathPanel_GetLocalPawn(int slot)
 		}
 		return g_MirvPovDeathPanelLocalPawnOverride;
 	}
-	return nullptr != g_MirvPovDeathPanelState.originalGetLocalPawn
-		? g_MirvPovDeathPanelState.originalGetLocalPawn(slot)
-		: nullptr;
+    if(0 == slot || -1 == slot) {
+        if(auto pawn = MirvPovMvpMusic_GetLocalPawn(caller)) return pawn;
+        if(auto pawn = MirvPovDeathCam_GetEffectPawn(caller)) return pawn;
+        if(auto pawn = MirvPovDeathPanel_GetAnimationPawn(caller)) return pawn;
+    }
+    previous = MirvPov_PushHookReturnAddress(caller);
+    auto result = nullptr != g_MirvPovDeathPanelState.originalGetLocalPawn
+        ? g_MirvPovDeathPanelState.originalGetLocalPawn(slot) : nullptr;
+    MirvPov_PopHookReturnAddress(previous);
+    return result;
 }
 
 class DeathPanelLocalPawnOverrideGuard {
@@ -1091,16 +1104,11 @@ struct DeathPanelReplayGateState {
 static DeathPanelReplayGateState DeathPanel_EnableReplayOthersGate()
 					{
 	DeathPanelReplayGateState state;
-	if(nullptr == g_MirvPovDeathPanelState.resolveReplayValue || nullptr == g_MirvPovDeathPanelState.replayObject) return state;
+	if(nullptr == g_MirvPovDeathPanelState.replayConVarSlot) return state;
 
 	__try {
-		state.value = g_MirvPovDeathPanelState.resolveReplayValue(g_MirvPovDeathPanelState.replayObject, -1);
-		if(nullptr == state.value
-			&& nullptr != g_MirvPovDeathPanelState.replayFallbackObject
-			&& nullptr != *g_MirvPovDeathPanelState.replayFallbackObject) {
-			state.value = *reinterpret_cast<unsigned char **>(
-				reinterpret_cast<unsigned char *>(*g_MirvPovDeathPanelState.replayFallbackObject) + 8);
-		}
+		void * convar = *g_MirvPovDeathPanelState.replayConVarSlot;
+		state.value = convar ? reinterpret_cast<unsigned char *>(convar) + 0x58 : nullptr;
 		if(nullptr != state.value) {
 			state.previous = *state.value;
 			*state.value = 1;
@@ -2024,7 +2032,9 @@ LAB_1809a7de1
 bool getPanoramaAddrs(HMODULE panoramaDll) {
 
 	// Refernces "CLayoutFile::LoadFromFile" string.
-	g_Org_Panorama_CLayoutFile_LoadFromFile = (Panorama_CLayoutFile_LoadFromFile_t)getAddress(panoramaDll,"48 89 5C 24 08 55 56 57 41 54 41 55 41 56 41 57 48 8B EC 48 83 EC 60 48 8D 05 ?? ?? ?? ?? 48 C7 45 D0 ?? ?? 00 00 48"); // 48 C7 45 D0 xx xx = source line number
+	// The embedded source line number changes between game builds.
+	g_Org_Panorama_CLayoutFile_LoadFromFile = (Panorama_CLayoutFile_LoadFromFile_t)getAddress(panoramaDll,
+		"48 89 5C 24 08 55 56 57 41 54 41 55 41 56 41 57 48 8B EC 48 83 EC 60 48 8D 05 ?? ?? ?? ?? 48 C7 45 D0 ?? ?? 00 00 48 89 45 C8 48 8B F2 0F 10 45 C8");
 	if(nullptr == g_Org_Panorama_CLayoutFile_LoadFromFile) {
 		return false;
 	}
@@ -2062,9 +2072,8 @@ bool getPanoramaAddrs(HMODULE panoramaDll) {
 		g_Org_Panorama_CStylePropertyWashColor_Parse = (Panorama_CStyleProperty_Parse_t)vtable[6];
 	}		
 
-		// Style-property discovery is optional. MirvPanorama_InitStyleProperties
-		// uses ErrorBox on unsupported builds, so defer it until a POV/deathmsg
-		// Panorama feature is actually active during startup.
+		// Style-property discovery is optional at startup. Setters also ensure
+		// initialization on demand when POV/deathmsg is enabled after startup.
 		if (DeathMsg_ShouldProcessPanoramaPath()
 			&& !MirvPanorama_InitStyleProperties(panoramaDll)) return false;
 
@@ -2189,6 +2198,8 @@ void HookDeathMsg(HMODULE clientDll) {
 	if (g_MirvDeathMsgGlobals.hooked) return;
 
 	MirvPovDeathPanel_ResolveAddresses(clientDll);
+	MirvPovMvpMusic_ResolveAddresses(clientDll,
+		reinterpret_cast<const void *>(g_MirvPovDeathPanelState.originalGetLocalPawn));
 	g_Original_getLocalSteamId = reinterpret_cast<g_Original_getLocalSteamId_t>(
 		MirvPovDeathPanel_ResolveEntityTokenAddress(clientDll));
 	// Restore the upstream killfeed handler independently of the POV listener.
@@ -2691,3 +2702,5 @@ CON_COMMAND(mirv_panorama, "")
 		, arg0
 	);
 }
+
+
