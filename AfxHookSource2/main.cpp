@@ -23,6 +23,7 @@
 #include "MirvFix.h"
 #include "MirvTime.h"
 #include "MirvPovCore.h"
+#include "MirvWeather.h"
 
 #include "../deps/release/prop/AfxHookSource/SourceSdkShared.h"
 #include "../deps/release/prop/AfxHookSource/SourceInterfaces.h"
@@ -1392,6 +1393,7 @@ CON_COMMAND(__mirv_print_search_paths, "")
 typedef void(* CCS2_Client_Shutdown_t)(void* This);
 CCS2_Client_Shutdown_t old_CCS2_Client_Shutdown;
 void new_CCS2_Client_Shutdown(void* This) {
+	MirvWeather_Reset();
 	AfxHookSource2Rs_Engine_Shutdown();
 
 	old_CCS2_Client_Shutdown(This);
@@ -1460,6 +1462,7 @@ extern void resetCachedMaterials();
 typedef void * (* CS2_Client_LevelInitPreEntity_t)(void* This, void * pUnk1, void * pUnk2);
 CS2_Client_LevelInitPreEntity_t old_CS2_Client_LevelInitPreEntity;
 void * new_CS2_Client_LevelInitPreEntity(void* This, void * pUnk1, void * pUnk2) {
+	MirvWeather_Reset();
 	resetDefaultCloudColors();
 	resetCachedMaterials();
 	MirvPov_OnLevelInitPreEntity();
@@ -1550,6 +1553,7 @@ void  new_CS2_Client_FrameStageNotify(void* This, SOURCESDK::CS2::ClientFrameSta
 
 	old_CS2_Client_FrameStageNotify(This, curStage);
 	MirvPov_OnFrameStageAfter(curStage);
+	if(SOURCESDK::CS2::FRAME_RENDER_PASS == curStage) MirvWeather_Frame();
 
 	AfxHookSource2Rs_Engine_OnClientFrameStageNotify(curStage, false);
 
@@ -2190,6 +2194,7 @@ void LibraryHooksW(HMODULE hModule, LPCWSTR lpLibFileName)
 		//if(!g_Import_client.Apply(hModule)) ErrorBox("client.dll steam_api64 hooks failed.");
 
 		HookMirvColors(hModule);
+		MirvWeather_Initialize(hModule);
 
 		HookMirvCommands(hModule);
 
