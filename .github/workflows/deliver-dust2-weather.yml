@@ -1,0 +1,60 @@
+name: Deliver Dust2 weather test package
+on:
+  pull_request:
+    branches: [main]
+    paths:
+      - '.github/workflows/deliver-dust2-weather.yml'
+      - 'delivery/**'
+  workflow_dispatch:
+permissions:
+  contents: write
+  actions: read
+jobs:
+  deliver:
+    if: github.event_name == 'workflow_dispatch' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/dust2-command-weather
+      - uses: actions/download-artifact@v4
+        with:
+          github-token: ${{ github.token }}
+          run-id: 37349169778
+          name: AfxHookSource2-5f87662e62b17f8d63ce0ced2c79bbbf88415861
+          path: artifacts
+      - name: Assemble verified binary and separate weather resources
+        shell: pwsh
+        run: |
+          $binary = 'artifacts/AfxHookSource2-5f87662e62b1-windows-x64.zip'
+          $source = 'artifacts/AfxHookSource2-5f87662e62b1-source.zip'
+          if (!(Test-Path -LiteralPath $binary) -or !(Test-Path -LiteralPath $source)) { throw 'Missing corresponding build archives' }
+          New-Item -ItemType Directory -Path stage/x64,release -Force | Out-Null
+          Expand-Archive -LiteralPath $binary -DestinationPath stage/x64
+          Expand-Archive -LiteralPath delivery/dust2-weather-resources.zip -DestinationPath stage
+          @(
+            'DLL build commit: 5f87662e62b17f8d63ce0ced2c79bbbf88415861'
+            'Branch code commit: 1ca5bc91d15c12737e9178ac00ab6dd9f6a10f20'
+            'Build run: https://github.com/M1styuki/advancedfx-killfeed-build/actions/runs/37349169778'
+            'Build: Windows Release x64 success'
+            'CS2: 1.41.8.8 / source revision 11076591'
+            'Game acceptance: pending'
+            ('DLL SHA256: ' + (Get-FileHash -LiteralPath stage/x64/AfxHookSource2.dll -Algorithm SHA256).Hash)
+          ) | Set-Content -LiteralPath stage/BUILD-INFO.txt -Encoding utf8
+          Compress-Archive -Path stage/* -DestinationPath release/Dust2-command-weather-CS2-1.41.8.8-test.zip
+          Copy-Item -LiteralPath $source -Destination release
+          Copy-Item -LiteralPath delivery/dust2-weather-resources.zip -Destination release
+      - name: Publish downloadable test package
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          @(
+            'Dust2 demo weather prototype. Windows Release x64 compilation passed; game visuals, seek, off/on and restoration still require acceptance.'
+            ''
+            'Download Dust2-command-weather-CS2-1.41.8.8-test.zip for the DLL, separate weather resources and Chinese instructions. Use a complete official HLAE 2.192.6 installation. This package does not contain a launcher and does not replace game maps.'
+            ''
+            'DLL/source commit: 5f87662e62b17f8d63ce0ced2c79bbbf88415861. Corresponding source ZIP is included as a separate asset. Weather resource data retains PolyForm Noncommercial 1.0.0 and required copyright notices; DLL software retains its own licenses.'
+          ) | Set-Content -LiteralPath notes.txt -Encoding utf8
+          $assets = Get-ChildItem -LiteralPath release -Filter '*.zip' | ForEach-Object { $_.FullName }
+          gh release create dust2-weather-test-5f87662e62b1 @assets --repo $env:GITHUB_REPOSITORY --target 5f87662e62b17f8d63ce0ced2c79bbbf88415861 --title 'Dust2 command weather test - CS2 1.41.8.8' --notes-file notes.txt --prerelease --latest=false

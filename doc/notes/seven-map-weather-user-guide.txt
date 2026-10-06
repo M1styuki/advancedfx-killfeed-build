@@ -1,0 +1,45 @@
+七图 Demo 天气版 AfxHookSource2
+
+支持：Dust2、Mirage、Cache、Inferno、Ancient、Nuke、Anubis。
+使用完整 HLAE 2.192.6；把成品包的 x64 和 resources 合并到 HLAE 安装目录。
+启动 CS2 后播放上述地图的本地 Demo，输入：
+mirv_weather 1
+mirv_weather status
+
+关闭：mirv_weather 0
+切换地图时自动选择配置，无需重启 DLL 或先打开 mirv_pov。
+mirv_pov 第一视角与 mirv_deathmsg 击杀过滤、显示时间继续保留。
+
+各地图 status 的预期雨宿主/湿地面材质数：
+Dust2       hosts=385/385   materials=18/18
+Mirage      hosts=832/832   materials=12/12
+Cache       hosts=969/969   materials=3/3
+Inferno     hosts=604/604   materials=2/2
+Ancient     hosts=166/166   materials=0/0
+Nuke        hosts=221/221   materials=0/0
+Anubis      hosts=1004/1004 materials=0/0
+Cache 使用新精细雨区；Ancient 保留原生湿地面。
+Nuke 按参考方案保留原地面，Anubis 保留原有水面；0/0 不代表资源加载失败。
+
+天空仍由 mirv_sky material 控制；天气不会覆盖你选定的天空。
+本版包含雨粒子、允许的湿地面材质、原生物体雨水接触与环境雨量、Train 环境后处理。
+参考项目部分地图另外修改静态地图网格制作局部水洼，这些新增网格不包含在本 DLL 版本。
+不会改写游戏地图包；没有闪电、雷声。
+
+独立对照开关：
+mirv_weather rain 0|1
+mirv_weather ground 0|1
+mirv_weather contact 0|1
+mirv_weather postprocess 0|1
+mirv_pov_debug_feature weather_environment 0|1
+也可使用已有 weather_rain、weather_ground、weather_contact、weather_postprocess debug 开关。
+这些开关立即生效，不需要先关闭并重开 mirv_pov。
+总开关开启时默认全开；关闭单项不关闭其他单项。
+重新读取资源：mirv_weather reload
+
+本版延续后处理区域与备份资源的引用配对修正，地图切换时清理上一张地图的数据。
+七图游戏验收及偶发回退崩溃验证尚未完成。
+请逐图检查室内外雨区、地面、枪身雨水、关闭恢复及连续前后跳转；若异常，请提供 status 完整输出。
+实际帧率尤其需要在 Cache、Anubis 的密集雨区验证。
+
+完整对应源码与 DLL 同页交付。天气资源独立保留 PolyForm Noncommercial 1.0.0 许可证、Copyright (c) 2026 DrEAmSs59、NOTICE 和 PROVENANCE。
