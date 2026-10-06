@@ -298,12 +298,14 @@ struct CBaseSceneData {
 	CMaterial2* material;
 	char _pad1[0x28];
 	uint32_t color;
-	char _pad2[0x14];
+	// The native scene array/capture copier advances by 0x70 bytes on CS2
+	// 1.41.8.9. Keep its tail as well: wet overrides submit a complete record.
+	char _pad2[0x1c];
 };
 
 size_t g_SceneObject_pSceneObjectDesc_Offset = -1;
 
-static_assert(sizeof(CBaseSceneData) == 0x68, "Unexpected CBaseSceneData size.");
+static_assert(sizeof(CBaseSceneData) == 0x70, "Unexpected native scene record size.");
 
 enum class SceneObjectDrawPolicy {
 	Draw,
@@ -1123,8 +1125,9 @@ void DrawWeatherSceneData(void * drawingData, CBaseSceneData * sceneData) {
 	}
 	CMaterial2 * wet = worldLayout ? MirvWeather_Material(sceneData->material) : nullptr;
 	if(sceneData && wet && wet != sceneData->material && drawingData && org_DrawCurrentPrimitives) {
-		// Flush before and after the changed material. Use a private copy: do not
-		// mutate the map's scene record or retain a stack record in a queued batch.
+		// The native flush consumes the current batch and clears its start/count.
+		// Its capture path copies 0x70 bytes, so the private record must include
+		// the complete native tail rather than the old 0x68-byte prefix.
 		org_DrawCurrentPrimitives(drawingData);
 		CBaseSceneData copy = *sceneData;
 		copy.material = wet;
