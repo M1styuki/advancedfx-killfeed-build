@@ -255,7 +255,7 @@ jobs:
           if (!(Test-Path -LiteralPath $binary) -or !(Test-Path -LiteralPath $source)) { throw 'Missing corresponding binary/source archives' }
           New-Item -ItemType Directory -Path stage/x64,release -Force | Out-Null
           Expand-Archive -LiteralPath $binary -DestinationPath stage/x64
-          Expand-Archive -LiteralPath delivery/seven-map-storm-resources.zip -DestinationPath stage
+          Expand-Archive -LiteralPath delivery/seven-map-weather-resources.zip -DestinationPath stage
           Copy-Item -LiteralPath doc/notes/seven-map-storm-user-guide.txt -Destination stage/使用说明.txt
           @(
             "DLL/source build commit: $env:GITHUB_SHA"
@@ -277,7 +277,7 @@ jobs:
           @(
             'Extend seven-map weather with guarded native sun/exposure, before-UI grading, native lightning and owned rain/thunder audio. Lightning uses demo time and the final kept killfeed result. Preserve the user-selected night-rain sky and original seven-map resource profiles. Additional static puddle meshes and baked-lighting rebuilds remain outside this controller.'
             ''
-            'Use a complete official HLAE 2.192.6 installation. Download the Seven-map-weather test ZIP for the replacement DLL, separate weather data and Chinese instructions. It does not replace game maps or require a separate launcher.'
+            'Use a complete official HLAE 2.192.6 installation. Download the Seven-map-storm test ZIP for the replacement DLL, separate weather data and Chinese instructions. It does not replace game maps or require a separate launcher.'
             ''
             "DLL and complete corresponding source commit: $env:GITHUB_SHA. Windows Release x64 build passed; in-game seven-map indoor/outdoor, native ground, restore/seek, performance and recording acceptance is pending."
             ''
