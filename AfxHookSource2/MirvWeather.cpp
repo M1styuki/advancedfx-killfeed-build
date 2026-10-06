@@ -10,6 +10,7 @@
 #include "hlaeFolder.h"
 #include "../deps/release/prop/cs2/sdk_src/public/cdll_int.h"
 #include <atomic>
+#include <array>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
@@ -48,6 +49,29 @@ struct ContactState {
     bool original;
 };
 std::vector<ContactState> contactStates;
+using RainEnvironmentFn = void (__fastcall *)(void *, void *, float, float, float, float, float);
+struct EnvironmentState {
+    SOURCESDK::CS2::CBaseHandle handle;
+    uint32_t worldGroup;
+    void * scene;
+    void * world;
+    std::array<float, 5> original;
+};
+std::vector<EnvironmentState> environmentStates;
+std::array<ptrdiff_t, 5> environmentOffsets {{ -1, -1, -1, -1, -1 }};
+std::array<float, 5> weatherEnvironment {{ 1, 1, 0, 1, 0 }};
+bool environmentSignatureReady = false, environmentSchemaReady = false, environmentWarning = false;
+struct MapProfile { const char * map; const char * file; size_t rainCount; size_t materialCount; };
+const MapProfile mapProfiles[] = {
+    { "de_dust2", "dust2.txt", 385, 18 },
+    { "de_mirage", "mirage.txt", 832, 12 },
+    { "de_cache", "cache.txt", 969, 3 },
+    { "de_inferno", "inferno.txt", 604, 2 },
+    { "de_ancient", "ancient.txt", 166, 0 },
+    { "de_nuke", "nuke.txt", 221, 0 },
+    { "de_anubis", "anubis.txt", 1004, 0 }
+};
+const MapProfile * loadedProfile = nullptr;
 void ** mapInfoVtable = nullptr, ** postVolumeVtable = nullptr;
 std::vector<SOURCESDK::CS2::CBaseHandle> mapInfoHandles, postVolumeHandles;
 ULONGLONG lastEntityScan = 0;
@@ -98,12 +122,16 @@ std::string Normalize(std::string s) {
     return s;
 }
 
-bool IsDust2Demo() {
-    if(!g_pEngineToClient) return false;
+const MapProfile * GetDemoProfile() {
+    if(!g_pEngineToClient) return nullptr;
     auto * demo = g_pEngineToClient->GetDemoFile();
-    if(!demo || !demo->IsPlayingDemo()) return false;
+    if(!demo || !demo->IsPlayingDemo()) return nullptr;
     const char * level = g_pEngineToClient->GetLevelNameShort();
-    return level && Normalize(level) == "de_dust2";
+    if(level) {
+        const std::string name = Normalize(level);
+        for(const auto & profile : mapProfiles) if(name == profile.map) return &profile;
+    }
+    return nullptr;
 }
 
 // The matched destroy routine verifies these manager/record fields itself.
@@ -194,6 +222,68 @@ void RestoreContact() {
     contactStates.clear();
 }
 
+bool ReadEnvironment(CEntityInstance * entity, std::array<float, 5> & values) {
+    if(!entity || !environmentSchemaReady) return false;
+    for(size_t i = 0; i < values.size(); ++i) {
+        values[i] = *reinterpret_cast<float *>(reinterpret_cast<unsigned char *>(entity) + environmentOffsets[i]);
+        if(!std::isfinite(values[i])) return false;
+    }
+    return true;
+}
+
+void PublishEnvironment(void * scene, void * world, const std::array<float, 5> & values) {
+    // Same five-float publication used by native CMapInfo initialization.
+    auto ** table = *reinterpret_cast<void ***>(scene);
+    auto setter = reinterpret_cast<RainEnvironmentFn>(table[0x1c8 / sizeof(void *)]);
+    setter(scene, world, values[0], values[1], values[2], values[3], values[4]);
+}
+
+void RestoreEnvironment() {
+    if(g_pEntityList && *g_pEntityList && g_GetEntityFromIndex) {
+        for(auto & state : environmentStates) {
+            auto * entity = GetEntityFromIndex(state.handle.GetEntryIndex());
+            if(!entity || entity->GetHandle() != state.handle) continue;
+            uint32_t group = 0;
+            bool enabled = false;
+            void * scene = nullptr, * world = nullptr;
+            if(!ReadContact(entity, group, enabled) || group != state.worldGroup
+                || !ResolveContact(group, scene, world) || scene != state.scene || world != state.world) continue;
+            // We publish to the scene, not to entity fields. Native values remain
+            // the current source of truth even if the map changed them while on.
+            if(ReadEnvironment(entity, state.original)) PublishEnvironment(scene, world, state.original);
+        }
+    }
+    environmentStates.clear();
+}
+
+void ApplyEnvironment() {
+    if(!environmentSignatureReady || !environmentSchemaReady || !contactSchemaReady
+        || !worldFn || !g_pEntityList || !*g_pEntityList || !g_GetEntityFromIndex) {
+        if(!environmentWarning) {
+            environmentWarning = true;
+            advancedfx::Warning("[mirv_weather] Native environment interface/schema unavailable; environment left unchanged.\n");
+        }
+        return;
+    }
+    for(const auto & handle : mapInfoHandles) {
+        auto * entity = GetEntityFromIndex(handle.GetEntryIndex());
+        if(!entity || entity->GetHandle() != handle) continue;
+        uint32_t group = 0;
+        bool enabled = false;
+        void * scene = nullptr, * world = nullptr;
+        std::array<float, 5> original {};
+        if(!ReadContact(entity, group, enabled) || !ReadEnvironment(entity, original)
+            || !ResolveContact(group, scene, world)) continue;
+        auto it = environmentStates.begin();
+        while(it != environmentStates.end() && it->handle != handle) ++it;
+        if(it == environmentStates.end()) {
+            if(environmentStates.size() >= 32) continue;
+            environmentStates.push_back({handle, group, scene, world, original});
+        } else *it = {handle, group, scene, world, original};
+        PublishEnvironment(scene, world, weatherEnvironment);
+    }
+}
+
 void DiscoverWeatherEntities() {
     if(!g_pEntityList || !*g_pEntityList || !g_GetEntityFromIndex) return;
     const ULONGLONG now = GetTickCount64();
@@ -246,36 +336,57 @@ void ApplyContact() {
 
 bool ReadConfig() {
     if(loadAttempted) return configLoaded;
+    if(!loadedProfile) return false;
     loadAttempted = true;
     const auto root = std::filesystem::path(GetHlaeFolderW()) / L"resources/AfxHookSource2/cs2/mirv_weather";
-    std::ifstream f(root / L"dust2.txt");
+    std::ifstream f(root / loadedProfile->file);
     std::string line;
-    if(!std::getline(f, line) || line != "MIRV_DUST2_WEATHER_1") {
-        advancedfx::Warning("[mirv_weather] Dust2 resource pack missing or unsupported. Install its resources folder in HLAE, then use mirv_weather reload.\n");
+    std::string magic, map, extra;
+    size_t rainCount = 0, materialCount = 0;
+    if(std::getline(f, line)) {
+        std::istringstream header(line);
+        header >> magic >> map >> rainCount >> materialCount;
+        header >> extra;
+    }
+    if(magic != "MIRV_MAP_WEATHER_2" || map != loadedProfile->map || !extra.empty()
+        || rainCount != loadedProfile->rainCount || materialCount != loadedProfile->materialCount) {
+        advancedfx::Warning("[mirv_weather] %s resource profile missing or unsupported. Install the seven-map resources, then use mirv_weather reload.\n", loadedProfile->map);
         return false;
     }
+    bool hasEnvironment = false, parsed = true;
     while(std::getline(f, line)) {
         if(line.empty() || line[0] == '#') continue;
         std::istringstream row(line);
         std::string type;
         row >> type;
-        if(type == "rain") {
+        if(type == "environment") {
+            if(hasEnvironment) { parsed = false; break; }
+            bool valid = true;
+            for(float & value : weatherEnvironment)
+                if(!(row >> value) || !std::isfinite(value) || value < 0 || value > 1) valid = false;
+            if(!valid) { parsed = false; break; }
+            hasEnvironment = true;
+        } else if(type == "rain") {
             Vec3 p {};
             if(!(row >> p.x >> p.y >> p.z) || !std::isfinite(p.x) || !std::isfinite(p.y) || !std::isfinite(p.z)
-                || fabsf(p.x) > 32768 || fabsf(p.y) > 32768 || fabsf(p.z) > 32768 || positions.size() >= 512) break;
+                || fabsf(p.x) > 32768 || fabsf(p.y) > 32768 || fabsf(p.z) > 32768 || positions.size() >= loadedProfile->rainCount) { parsed = false; break; }
             positions.push_back(p);
         } else if(type == "material") {
             MaterialEntry e;
-            if(!(row >> e.original >> e.wet) || e.original.find("materials/de_dust/") != 0
+            if(!(row >> e.original >> e.wet) || e.original.find("materials/") != 0
                 || e.wet.find("materials/mirv_weather/") != 0 || e.wet.find("..") != std::string::npos
-                || materialEntries.size() >= 32) break;
+                || e.original.find("..") != std::string::npos || e.original.size() > 256 || e.wet.size() > 256
+                || e.original.size() < 6 || e.original.compare(e.original.size()-5, 5, ".vmat") != 0
+                || e.wet.size() < 6 || e.wet.compare(e.wet.size()-5, 5, ".vmat") != 0
+                || materialEntries.size() >= loadedProfile->materialCount) { parsed = false; break; }
             e.original = Normalize(e.original);
             materialEntries.push_back(e);
-        } else break;
+        } else { parsed = false; break; }
+        if(row >> extra) { parsed = false; break; }
     }
-    if(!f.eof() || positions.size() != 385 || materialEntries.size() != 18) {
+    if(!parsed || !f.eof() || !hasEnvironment || positions.size() != rainCount || materialEntries.size() != materialCount) {
         positions.clear(); materialEntries.clear();
-        advancedfx::Warning("[mirv_weather] Invalid Dust2 resource manifest; effects left off.\n");
+        advancedfx::Warning("[mirv_weather] Invalid %s resource profile; effects left off.\n", loadedProfile->map);
         return false;
     }
     configLoaded = true;
@@ -283,6 +394,7 @@ bool ReadConfig() {
 }
 
 void LoadMaterials() {
+    if(materialEntries.empty()) return; // native ground / rain-only map profile
     if(groundReady || groundLoadAttempted || !g_pCResourceSystem) return;
     groundLoadAttempted = true;
     if(!resourcePinLayoutReady) {
@@ -385,15 +497,20 @@ void ApplyPost() {
 }
 
 void PrintStatus() {
-    advancedfx::Message("[mirv_weather] requested=%d Dust2Demo=%d pack=%d; rain=%d hosts=%zu native=%d; ground=%d materials=%zu; postprocess=%d volumes=%zu schema=%d.\n",
-        requested, IsDust2Demo(), configLoaded, wantRain, rainParticles.size(), destroyFn && managerFn && createFn && updateFn,
-        groundActive.load(), wetMaterials.size(), wantPost, postBackups.size(), postSettingsOffset > 0);
+    const auto * profile = GetDemoProfile();
+    advancedfx::Message("[mirv_weather] requested=%d map=%s supportedDemo=%d pack=%d; rain=%d hosts=%zu/%zu native=%d; ground=%d materials=%zu/%zu; postprocess=%d volumes=%zu schema=%d.\n",
+        requested, profile ? profile->map : "unsupported", profile != nullptr, configLoaded,
+        wantRain, rainParticles.size(), profile ? profile->rainCount : 0, destroyFn && managerFn && createFn && updateFn,
+        groundActive.load(), wetMaterials.size(), profile ? profile->materialCount : 0, wantPost, postBackups.size(), postSettingsOffset > 0);
     advancedfx::Message("[mirv_weather] contact requested=%d active=%d worlds=%zu interface=%d schema=%d.\n",
         wantContact && MirvPovDebug_IsFeatureEnabled("weather_contact"), !contactStates.empty(), contactStates.size(),
         worldFn != nullptr, contactSchemaReady);
     advancedfx::Message("[mirv_weather] map objects: mapInfo=%zu postVolumes=%zu RTTI=%d/%d; ground requested=%d debug=%d ready=%d.\n",
         mapInfoHandles.size(), postVolumeHandles.size(), mapInfoVtable != nullptr, postVolumeVtable != nullptr,
         wantGround, MirvPovDebug_IsFeatureEnabled("weather_ground"), groundReady);
+    advancedfx::Message("[mirv_weather] environment requested=%d worlds=%zu interface=%d schema=%d; ground profile=%s.\n",
+        MirvPovDebug_IsFeatureEnabled("weather_environment"), environmentStates.size(), environmentSignatureReady,
+        environmentSchemaReady, profile && profile->materialCount ? "wet-materials" : "native-ground");
 }
 
 size_t UniqueAddress(HMODULE dll, const char * pattern) {
@@ -411,6 +528,7 @@ void MirvWeather_Initialize(HMODULE clientDll) {
     if(HMODULE resources = GetModuleHandleA("resourcesystem.dll"))
         resourcePinLayoutReady = 0 != UniqueAddress(resources, "8B 43 20 85 C0 0F 84 ?? ?? ?? ?? 48 0F BE 43 1C 48 83 C5 D0 3C FF");
     postLifetimeLayoutReady = 0 != UniqueAddress(clientDll, "48 8B 91 90 11 00 00 48 85 D2 74 ?? 48 83 3D ?? ?? ?? ?? 00 74 ?? F0 FF 4A 20");
+    environmentSignatureReady = 0 != UniqueAddress(clientDll, "F3 0F 10 B6 2C 06 00 00 F3 0F 10 BE 28 06 00 00 48 8B 08 8B 52 38 F3 44 0F 10 86 24 06 00 00 F3 44 0F 10 8E 20 06 00 00");
     // These non-networked map classes inherit a base network-class descriptor.
     // Match their actual dynamic type instead of GetClientClassName().
     mapInfoVtable = reinterpret_cast<void **>(Afx::BinUtils::FindClassVtable(clientDll, ".?AVCMapInfo@@", 0, 0));
@@ -436,12 +554,19 @@ void MirvWeather_ResolveSchemaOffsets() {
     getOffset(&rainContactOffset, "client.dll", "CMapInfo", "m_bRainTraceToSkyEnabled");
     // The verified native signature embeds this layout; do not guess if it changes.
     contactSchemaReady = identityOffset == 0x10 && worldGroupOffset == 0x38 && rainContactOffset == 0x619;
+    const char * names[] = { "m_flEnvRainStrength", "m_flEnvPuddleRippleStrength", "m_flEnvPuddleRippleDirection", "m_flEnvWetnessCoverage", "m_flEnvWetnessDryingAmount" };
+    environmentSchemaReady = true;
+    for(size_t i = 0; i < environmentOffsets.size(); ++i) {
+        getOffset(&environmentOffsets[i], "client.dll", "CMapInfo", names[i]);
+        if(environmentOffsets[i] != 0x61c + static_cast<ptrdiff_t>(i * 4)) environmentSchemaReady = false;
+    }
 }
 
 void MirvWeather_Reset() {
     groundActive.store(false);
     StopRain();
     RestorePost();
+    RestoreEnvironment();
     RestoreContact();
     mapInfoHandles.clear();
     postVolumeHandles.clear();
@@ -457,15 +582,24 @@ void MirvWeather_Reset() {
     ReleaseBinding(postResource);
     postResource = nullptr;
     previousTick = -1;
+    loadedProfile = nullptr;
+    configLoaded = loadAttempted = false;
+    positions.clear();
+    materialEntries.clear();
 }
 
 void MirvWeather_Frame() {
-    const bool active = requested && IsDust2Demo();
-    if(!active) { if(rainAttempted || !postBackups.empty() || !contactStates.empty() || groundActive.load()) MirvWeather_Reset(); return; }
+    const MapProfile * profile = requested ? GetDemoProfile() : nullptr;
+    if(!profile) { if(loadedProfile) MirvWeather_Reset(); return; }
+    // The master preference survives map changes, all map-owned resources do not.
+    if(profile != loadedProfile) {
+        MirvWeather_Reset();
+        loadedProfile = profile;
+    }
     if(!ReadConfig()) return;
     const int tick = g_pEngineToClient->GetDemoFile()->GetDemoTick();
     // Avoid retaining particle state across a rewind or large demo jump.
-    if(previousTick >= 0 && (tick < previousTick || tick - previousTick > 128)) { StopRain(); RestorePost(); RestoreContact(); lastEntityScan = 0; }
+    if(previousTick >= 0 && (tick < previousTick || tick - previousTick > 128)) { StopRain(); RestorePost(); RestoreEnvironment(); RestoreContact(); lastEntityScan = 0; }
     previousTick = tick;
     DiscoverWeatherEntities();
     if(!rainParticles.empty() && (managerFn() != rainManager
@@ -475,6 +609,7 @@ void MirvWeather_Frame() {
     if(wantGround && MirvPovDebug_IsFeatureEnabled("weather_ground")) LoadMaterials();
     groundActive.store(wantGround && groundReady && MirvPovDebug_IsFeatureEnabled("weather_ground"));
     if(wantPost && MirvPovDebug_IsFeatureEnabled("weather_postprocess")) ApplyPost(); else RestorePost();
+    if(MirvPovDebug_IsFeatureEnabled("weather_environment")) ApplyEnvironment(); else RestoreEnvironment();
     if(wantContact && MirvPovDebug_IsFeatureEnabled("weather_contact")) ApplyContact(); else RestoreContact();
 }
 
@@ -489,7 +624,7 @@ CMaterial2 * MirvWeather_Material(CMaterial2 * original) {
     return it == wetMaterials.end() ? original : it->second;
 }
 
-CON_COMMAND(mirv_weather, "Dust2 demo rain, native rain contact, wet ground and postprocessing") {
+CON_COMMAND(mirv_weather, "Seven-map demo rain, native rain contact/environment, wet ground and postprocessing") {
     if(args->ArgC() == 2 && (!strcmp(args->ArgV(1), "0") || !strcmp(args->ArgV(1), "1"))) {
         requested = args->ArgV(1)[0] == '1';
         if(!requested) MirvWeather_Reset();
@@ -505,7 +640,7 @@ CON_COMMAND(mirv_weather, "Dust2 demo rain, native rain contact, wet ground and 
         configLoaded = loadAttempted = false;
         positions.clear(); materialEntries.clear();
     } else if(args->ArgC() != 2 || _stricmp(args->ArgV(1), "status")) {
-        advancedfx::Message("mirv_weather 0|1; mirv_weather rain|ground|postprocess|contact 0|1; mirv_weather status|reload.\nWeather requires the Dust2 resource pack in HLAE resources. Sky remains controlled by mirv_sky material.\n");
+        advancedfx::Message("mirv_weather 0|1; mirv_weather rain|ground|postprocess|contact 0|1; mirv_weather status|reload.\nSeven-map offline demos: de_dust2, de_mirage, de_cache, de_inferno, de_ancient, de_nuke, de_anubis. Install the matching resources in HLAE. Native environment: mirv_pov_debug_feature weather_environment 0|1. Sky remains controlled by mirv_sky material.\n");
     }
     MirvWeather_Frame();
     PrintStatus();

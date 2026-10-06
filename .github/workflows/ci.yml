@@ -218,7 +218,7 @@ jobs:
           fi
 
   publish_weather_contact:
-    name: Publish Dust2 rain-contact test package
+    name: Publish seven-map weather test package
     if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'feat/dust2-command-weather' }}
     needs: build
     runs-on: windows-2022
@@ -240,17 +240,17 @@ jobs:
           if (!(Test-Path -LiteralPath $binary) -or !(Test-Path -LiteralPath $source)) { throw 'Missing corresponding binary/source archives' }
           New-Item -ItemType Directory -Path stage/x64,release -Force | Out-Null
           Expand-Archive -LiteralPath $binary -DestinationPath stage/x64
-          Expand-Archive -LiteralPath delivery/dust2-weather-resources.zip -DestinationPath stage
-          Copy-Item -LiteralPath doc/notes/dust2-rain-contact-user-guide.txt -Destination stage/使用说明.txt
+          Expand-Archive -LiteralPath delivery/seven-map-weather-resources.zip -DestinationPath stage
+          Copy-Item -LiteralPath doc/notes/seven-map-weather-user-guide.txt -Destination stage/使用说明.txt
           @(
             "DLL/source build commit: $env:GITHUB_SHA"
             "Build run: https://github.com/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
             'Build: Windows Release x64 success'
             'CS2: 1.41.8.9 / source revision 11087167'
-            'Game visual acceptance: pending'
+            'Seven-map visual and repeated-seek acceptance: pending'
             ('DLL SHA256: ' + (Get-FileHash -LiteralPath stage/x64/AfxHookSource2.dll -Algorithm SHA256).Hash)
           ) | Set-Content -LiteralPath stage/BUILD-INFO.txt -Encoding utf8
-          Compress-Archive -Path stage/* -DestinationPath "release/Dust2-weather-contact-$shortSha-test.zip"
+          Compress-Archive -Path stage/* -DestinationPath "release/Seven-map-weather-$shortSha-test.zip"
           Copy-Item -LiteralPath $source -Destination release
       - name: Publish matching test DLL and source
         shell: pwsh
@@ -258,13 +258,13 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $shortSha = $env:GITHUB_SHA.Substring(0, 12)
-          $tag = "dust2-weather-contact-$shortSha"
+          $tag = "seven-map-weather-$shortSha"
           @(
-            'Restore the omitted native dynamic-object rain contact from the reference Dust2 profile. Keep one airborne rain source and authored wet ground; preserve native rain/wetness/drying values. Fix caching of optional weather schema before its temporary table is cleared.'
+            'Command-driven rain for Dust2, Mirage, Cache, Inferno, Ancient, Nuke and Anubis. Use the refined Cache profile, map-specific wet materials, native rain contact/environment and postprocessing; preserve owned resources across restore/seek. Additional static puddle meshes from reference map packages are outside this DLL controller. Sky remains under mirv_sky.'
             ''
-            'Use a complete official HLAE 2.192.6 installation. Download the Dust2-weather-contact test ZIP for the replacement DLL, separate weather data and Chinese instructions. It does not replace game maps or require a separate launcher.'
+            'Use a complete official HLAE 2.192.6 installation. Download the Seven-map-weather test ZIP for the replacement DLL, separate weather data and Chinese instructions. It does not replace game maps or require a separate launcher.'
             ''
-            "DLL and complete corresponding source commit: $env:GITHUB_SHA. Windows Release x64 build passed; in-game weapons/gloves, indoor/outdoor, restore/seek and recording acceptance is pending."
+            "DLL and complete corresponding source commit: $env:GITHUB_SHA. Windows Release x64 build passed; in-game seven-map indoor/outdoor, native ground, restore/seek, performance and recording acceptance is pending."
             ''
             'DLL software retains its licenses; weather data is separately licensed under PolyForm Noncommercial 1.0.0 with notices and provenance included.'
           ) | Set-Content -LiteralPath notes.txt -Encoding utf8
@@ -273,6 +273,6 @@ jobs:
           if ($LASTEXITCODE -eq 0) {
             gh release upload $tag @assets --repo $env:GITHUB_REPOSITORY --clobber
           } else {
-            gh release create $tag @assets --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title "Dust2 native rain contact test - $shortSha" --notes-file notes.txt --prerelease --latest=false
+            gh release create $tag @assets --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title "Seven-map command weather test - $shortSha" --notes-file notes.txt --prerelease --latest=false
           }
           if ($LASTEXITCODE -ne 0) { throw 'Release publication failed' }
