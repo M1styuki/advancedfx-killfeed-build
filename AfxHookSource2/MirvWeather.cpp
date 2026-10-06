@@ -60,17 +60,37 @@ std::shared_mutex materialMutex;
 std::unordered_map<std::string, CMaterial2 *> wetMaterials;
 std::vector<CMaterial2 **> retainedWetBindings;
 bool resourcePinLayoutReady = false;
+bool postLifetimeLayoutReady = false;
 std::vector<Vec3> positions;
 struct MaterialEntry { std::string original, wet; };
 std::vector<MaterialEntry> materialEntries;
 struct Particle { int index; void * record; };
 std::vector<Particle> rainParticles;
 void * rainManager = nullptr;
+void ** rainResource = nullptr;
 struct PostBackup { SOURCESDK::CS2::CBaseHandle handle; void ** original; };
 std::vector<PostBackup> postBackups;
 void ** postResource = nullptr;
 int previousTick = -1;
 const char * rainName = "particles/mirv_weather/dust2_rain.vpcf";
+
+// C_PostProcessingVolume's destructor releases its m_hPostSettings binding at
+// +0x20. A raw pointer swap must therefore transfer the field's owned reference.
+void RetainBinding(void ** binding) {
+    if(binding) InterlockedIncrement(reinterpret_cast<LONG *>(reinterpret_cast<unsigned char *>(binding) + 0x20));
+}
+
+void ReleaseBinding(void ** binding) {
+    if(binding) InterlockedDecrement(reinterpret_cast<LONG *>(reinterpret_cast<unsigned char *>(binding) + 0x20));
+}
+
+void ReplacePostBinding(void *** field, void ** replacement) {
+    if(*field == replacement) return;
+    RetainBinding(replacement);
+    void ** previous = *field;
+    *field = replacement;
+    ReleaseBinding(previous);
+}
 
 std::string Normalize(std::string s) {
     for(char & c : s) { if(c == '\\') c = '/'; else if(c >= 'A' && c <= 'Z') c += 'a' - 'A'; }
@@ -111,6 +131,8 @@ void StopRain() {
     rainParticles.clear();
     rainManager = nullptr;
     rainAttempted = false;
+    ReleaseBinding(rainResource);
+    rainResource = nullptr;
 }
 
 void RestorePost() {
@@ -119,9 +141,10 @@ void RestorePost() {
             auto * entity = GetEntityFromIndex(b.handle.GetEntryIndex());
             if(!entity || entity->GetHandle() != b.handle) continue;
             auto *** field = reinterpret_cast<void ***>(reinterpret_cast<unsigned char *>(entity) + postSettingsOffset);
-            if(*field == postResource) *field = b.original;
+            if(*field == postResource) ReplacePostBinding(field, b.original);
         }
     }
+    for(const auto & b : postBackups) ReleaseBinding(b.original);
     postBackups.clear();
 }
 
@@ -301,7 +324,7 @@ void LoadMaterials() {
 }
 
 void StartRain() {
-    if(rainAttempted || !managerFn || !createFn || !updateFn || !destroyFn || !g_pCResourceSystem) return;
+    if(rainAttempted || !managerFn || !createFn || !updateFn || !destroyFn || !g_pCResourceSystem || !resourcePinLayoutReady) return;
     rainAttempted = true;
     // The generic resource precache wrapper accepts particle definitions too.
     auto ** resource = g_pCResourceSystem->PreCache(rainName);
@@ -311,6 +334,8 @@ void StartRain() {
     }
     rainManager = managerFn();
     if(!rainManager) { rainAttempted = false; return; }
+    rainResource = reinterpret_cast<void **>(resource);
+    RetainBinding(rainResource);
     for(const auto & position : positions) {
         int index = -1;
         // World-origin attachment, as used by the native spectator trail.
@@ -325,11 +350,11 @@ void StartRain() {
 }
 
 void ApplyPost() {
-    if(postSettingsOffset <= 0 && !postSchemaWarning) {
+    if((postSettingsOffset != 0x1190 || !postLifetimeLayoutReady || !resourcePinLayoutReady) && !postSchemaWarning) {
         postSchemaWarning = true;
-        advancedfx::Warning("[mirv_weather] Postprocessing schema unavailable; postprocessing left unchanged.\n");
+        advancedfx::Warning("[mirv_weather] Postprocessing ownership layout unavailable; postprocessing left unchanged.\n");
     }
-    if(postSettingsOffset <= 0 || !g_pCResourceSystem || !g_pEntityList || !*g_pEntityList
+    if(postSettingsOffset != 0x1190 || !postLifetimeLayoutReady || !resourcePinLayoutReady || !g_pCResourceSystem || !g_pEntityList || !*g_pEntityList
         || !postVolumeVtable || !g_GetEntityFromIndex) return;
     if(!postReady) {
         if(postLoadAttempted) return;
@@ -337,7 +362,8 @@ void ApplyPost() {
         postResource = reinterpret_cast<void **>(g_pCResourceSystem->PreCache(
             "lighting/postprocessing/de_train_prefab/de_train_postprocess.vpost"));
         postReady = postResource && *postResource;
-        if(!postReady) { advancedfx::Warning("[mirv_weather] Train postprocessing resource unavailable.\n"); return; }
+        if(!postReady) { postResource = nullptr; advancedfx::Warning("[mirv_weather] Train postprocessing resource unavailable.\n"); return; }
+        RetainBinding(postResource); // controller ownership, separate from each entity field
     }
     for(const auto & cachedHandle : postVolumeHandles) {
         auto * entity = GetEntityFromIndex(cachedHandle.GetEntryIndex());
@@ -348,9 +374,13 @@ void ApplyPost() {
         if(*field == postResource) continue;
         auto it = postBackups.begin();
         while(it != postBackups.end() && it->handle != handle) ++it;
+        RetainBinding(*field); // keep the original alive until restoration, including seeks
         if(it == postBackups.end()) postBackups.push_back({handle, *field});
-        else it->original = *field; // honor native changes made while enabled
-        *field = postResource;
+        else {
+            ReleaseBinding(it->original);
+            it->original = *field; // honor native changes made while enabled
+        }
+        ReplacePostBinding(field, postResource);
     }
 }
 
@@ -380,6 +410,7 @@ size_t UniqueAddress(HMODULE dll, const char * pattern) {
 void MirvWeather_Initialize(HMODULE clientDll) {
     if(HMODULE resources = GetModuleHandleA("resourcesystem.dll"))
         resourcePinLayoutReady = 0 != UniqueAddress(resources, "8B 43 20 85 C0 0F 84 ?? ?? ?? ?? 48 0F BE 43 1C 48 83 C5 D0 3C FF");
+    postLifetimeLayoutReady = 0 != UniqueAddress(clientDll, "48 8B 91 90 11 00 00 48 85 D2 74 ?? 48 83 3D ?? ?? ?? ?? 00 74 ?? F0 FF 4A 20");
     // These non-networked map classes inherit a base network-class descriptor.
     // Match their actual dynamic type instead of GetClientClassName().
     mapInfoVtable = reinterpret_cast<void **>(Afx::BinUtils::FindClassVtable(clientDll, ".?AVCMapInfo@@", 0, 0));
@@ -423,6 +454,7 @@ void MirvWeather_Reset() {
     groundReady = false;
     groundLoadAttempted = postLoadAttempted = false;
     postReady = false;
+    ReleaseBinding(postResource);
     postResource = nullptr;
     previousTick = -1;
 }

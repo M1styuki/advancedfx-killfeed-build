@@ -45,3 +45,9 @@ PolyForm Noncommercial 1.0.0 许可证、NOTICE 与 PROVENANCE。
 本次继续修正湿地面材质调用：使用材质系统的明确查找结果、持有资源引用，绘制时恢复原始记录，检查必需回调可调用。
 若出现 Wet material has no callable render interface 或 Resource reference layout unavailable，地面会保留原状态。这是明确拒绝不兼容材质，不能当作完整修复通过。
 请确认 ground=1 materials=18 后持续播放，并观察开关与跳转是否稳定。
+
+本版补齐后处理区域、原始资源备份和雨粒子资源的引用。修正回退重建场景时扣减未持有引用的错误。
+上版完整天气正常播放已获确认；本版反复回退的稳定性仍待游戏验证。
+使用方式不变：mirv_weather ground 1，然后 mirv_weather 1。
+请在同一 Demo 连续回退、向前跳转数次，再关闭并重新开启天气；不要以单次成功认定偶发闪退已解决。
+如果仍闪退，可独立输入 mirv_weather postprocess 0 做后处理对照，其他效果保持开启。
