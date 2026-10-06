@@ -32,6 +32,25 @@ MaterialUpdate_t org_MaterialUpdate = nullptr;
 
 CResourceSystem* g_pCResourceSystem = nullptr;
 
+CMaterial2 ** FindRenderMaterial(const char * name) {
+	CMaterial2 ** result = nullptr;
+	if(org_FindMaterial && name) org_FindMaterial(nullptr, &result, name);
+	return result;
+}
+
+bool MaterialRenderCallbacksReady(CMaterial2 * material) {
+	if(!material) return false;
+	void ** table = *reinterpret_cast<void ***>(material);
+	if(!table || !table[0] || !table[5]) return false;
+	for(void * callback : {table[0], table[5]}) {
+		MEMORY_BASIC_INFORMATION info {};
+		if(!VirtualQuery(callback, &info, sizeof(info)) || info.State != MEM_COMMIT
+			|| (info.Protect & (PAGE_GUARD | PAGE_NOACCESS))) return false;
+		if(!(info.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY))) return false;
+	}
+	return true;
+}
+
 struct CBufferStringWrapper {
 	SOURCESDK::CS2::CBufferString buf;
 	u_char pad[0xE0 - sizeof(SOURCESDK::CS2::CBufferString)];
@@ -1125,14 +1144,14 @@ void DrawWeatherSceneData(void * drawingData, CBaseSceneData * sceneData) {
 	}
 	CMaterial2 * wet = worldLayout ? MirvWeather_Material(sceneData->material) : nullptr;
 	if(sceneData && wet && wet != sceneData->material && drawingData && org_DrawCurrentPrimitives) {
-		// The native flush consumes the current batch and clears its start/count.
-		// Its capture path copies 0x70 bytes, so the private record must include
-		// the complete native tail rather than the old 0x68-byte prefix.
+		// Submit the engine-owned record so native side paths retain their own
+		// stable storage. The material change is scoped to this isolated draw.
 		org_DrawCurrentPrimitives(drawingData);
-		CBaseSceneData copy = *sceneData;
-		copy.material = wet;
-		org_DrawSceneData(drawingData, &copy);
+		CMaterial2 * original = sceneData->material;
+		sceneData->material = wet;
+		org_DrawSceneData(drawingData, sceneData);
 		org_DrawCurrentPrimitives(drawingData);
+		sceneData->material = original;
 	} else org_DrawSceneData(drawingData, sceneData);
 }
 
