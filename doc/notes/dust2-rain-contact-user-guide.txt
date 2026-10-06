@@ -1,0 +1,43 @@
+Dust2 雨水接触修正版（CS2 1.41.8.9）
+
+这版补回参考项目已包含、上次移植遗漏的原生物体雨水接触检测。
+沿用原来的一套空中雨粒子与 18 个湿地面材质，不增加第二套降雨。
+保留地图原有环境雨量、湿润覆盖率和干燥参数；不替换饰品材质。
+同时修复天气后处理字段在临时 schema 表清空后才查找的问题。
+
+需要完整 HLAE 2.192.6 安装。退出 CS2 后，将包内 x64/AfxHookSource2.dll
+覆盖到 HLAE 的 x64 目录，resources 与 HLAE 的 resources 合并。
+本包不改游戏地图、不装额外启动器。已有天气资源与此前相同。
+
+进入 Dust2 Demo：
+mirv_weather 1
+mirv_weather status
+
+关闭并恢复原有状态：
+mirv_weather 0
+
+原生雨水接触独立对照（0 关闭、1 恢复）：
+mirv_weather contact 0
+mirv_weather contact 1
+也可以使用 mirv_pov_debug_feature weather_contact 0 或 1。
+这些操作无需先关闭、重新打开 mirv_pov，下一渲染帧生效。
+关闭 contact 不关闭空中雨、地面和后处理；正常启用使用天气总开关即可。
+
+天空继续由 mirv_sky material 控制。
+
+验收范围：Windows Release x64 编译及静态代码核对；游戏内视觉验收仍待完成。
+在室外看枪身、刀和手套，再到室内做对照；暂停、跳转、倒退和关闭天气后观察恢复。
+status 应显示 contact active=1 worlds>=1 interface=1 schema=1。
+如果 active=0 或出现 Native rain contact interface/schema unavailable，
+请提供完整 mirv_weather status 输出。不要仅凭编译通过认定手套外观已经验证。
+
+DLL 的软件许可证与完整对应源码随包/同页资产保留；天气数据单独保留
+PolyForm Noncommercial 1.0.0 许可证、NOTICE 与 PROVENANCE。
+
+本版另外修正：完整查找客户端地图对象；使用真实 RTTI 类型识别地图参数和后处理；接受湿地面资源保留的原材质名。
+预期状态：ground=1 materials=18，postprocess volumes>0，contact active=1 worlds>0，RTTI=1/1。
+视觉仍需对照；材质加载失败行现在会显示 resolved 名称，便于直接定位。
+
+本版修正湿地面绘制记录截断：保留新版原生记录的完整 112 字节（此前只复制 104 字节）。
+先前关闭地面的测试仅用于定位；测试本版时请启用 mirv_weather ground 1，再执行 mirv_weather 1。
+需要观察湿地面开启时是否稳定、关闭/恢复和跳转是否正常。编译通过不等于崩溃已得到游戏验收。
