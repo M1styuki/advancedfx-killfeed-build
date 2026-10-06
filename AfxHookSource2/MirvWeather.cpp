@@ -48,6 +48,9 @@ struct ContactState {
     bool original;
 };
 std::vector<ContactState> contactStates;
+void ** mapInfoVtable = nullptr, ** postVolumeVtable = nullptr;
+std::vector<SOURCESDK::CS2::CBaseHandle> mapInfoHandles, postVolumeHandles;
+ULONGLONG lastEntityScan = 0;
 bool requested = false, wantRain = true, wantGround = true, wantPost = true, wantContact = true;
 bool configLoaded = false, loadAttempted = false, rainAttempted = false;
 bool groundReady = false, postReady = false;
@@ -166,22 +169,39 @@ void RestoreContact() {
     contactStates.clear();
 }
 
+void DiscoverWeatherEntities() {
+    if(!g_pEntityList || !*g_pEntityList || !g_GetEntityFromIndex) return;
+    const ULONGLONG now = GetTickCount64();
+    if(lastEntityScan && now - lastEntityScan < 1000) return;
+    lastEntityScan = now;
+    mapInfoHandles.clear();
+    postVolumeHandles.clear();
+    // The native getter accepts 0..0x7ffe, including client-only map objects.
+    // The legacy script helper's hardcoded 2048 is not an entity namespace bound.
+    for(int i = 0; i < 0x7fff; ++i) {
+        auto * entity = GetEntityFromIndex(i);
+        if(!entity) continue;
+        auto ** vtable = *reinterpret_cast<void ***>(entity);
+        if(vtable != mapInfoVtable && vtable != postVolumeVtable) continue;
+        auto handle = entity->GetHandle();
+        if(!handle.IsValid()) continue;
+        if(vtable == mapInfoVtable) mapInfoHandles.push_back(handle);
+        if(vtable == postVolumeVtable) postVolumeHandles.push_back(handle);
+    }
+}
+
 void ApplyContact() {
     if(!contactSchemaReady || !worldFn || !g_pEntityList || !*g_pEntityList
-        || !g_GetHighestEntityIndex || !g_GetEntityFromIndex) {
+        || !mapInfoVtable || !g_GetEntityFromIndex) {
         if(!contactWarning) {
             contactWarning = true;
             advancedfx::Warning("[mirv_weather] Native rain contact interface/schema unavailable; contact left unchanged.\n");
         }
         return;
     }
-    const int highest = GetHighestEntityIndex();
-    if(highest < 0 || highest > 32768) return;
-    for(int i = 0; i <= highest; ++i) {
-        auto * entity = GetEntityFromIndex(i);
-        if(!entity) continue;
-        const char * name = entity->GetClientClassName();
-        if(!name || strcmp(name, "CMapInfo")) continue;
+    for(const auto & cachedHandle : mapInfoHandles) {
+        auto * entity = GetEntityFromIndex(cachedHandle.GetEntryIndex());
+        if(!entity || entity->GetHandle() != cachedHandle) continue;
         auto handle = entity->GetHandle();
         uint32_t group = 0;
         bool original = false;
@@ -243,8 +263,13 @@ void LoadMaterials() {
     std::unordered_map<std::string, CMaterial2 *> loaded;
     for(const auto & e : materialEntries) {
         auto ** material = g_pCResourceSystem->PreCache(e.wet.c_str());
-        if(!material || !*material || !(*material)->GetName() || Normalize((*material)->GetName()) != Normalize(e.wet)) {
-            advancedfx::Warning("[mirv_weather] Wet material could not be loaded: %s\n", e.wet.c_str());
+        const char * name = material && *material ? (*material)->GetName() : nullptr;
+        const std::string resolved = name ? Normalize(name) : std::string();
+        // Renaming the loose compiled file does not rename its m_materialName.
+        // Accept only the requested name or this manifest entry's authored name;
+        // keep rejecting default/error materials and unrelated resource aliases.
+        if(!name || (resolved != Normalize(e.wet) && resolved != e.original)) {
+            advancedfx::Warning("[mirv_weather] Wet material could not be loaded: %s (resolved=%s).\n", e.wet.c_str(), name ? name : "<null>");
             return;
         }
         loaded[e.original] = *material;
@@ -284,7 +309,7 @@ void ApplyPost() {
         advancedfx::Warning("[mirv_weather] Postprocessing schema unavailable; postprocessing left unchanged.\n");
     }
     if(postSettingsOffset <= 0 || !g_pCResourceSystem || !g_pEntityList || !*g_pEntityList
-        || !g_GetHighestEntityIndex || !g_GetEntityFromIndex) return;
+        || !postVolumeVtable || !g_GetEntityFromIndex) return;
     if(!postReady) {
         if(postLoadAttempted) return;
         postLoadAttempted = true;
@@ -293,13 +318,9 @@ void ApplyPost() {
         postReady = postResource && *postResource;
         if(!postReady) { advancedfx::Warning("[mirv_weather] Train postprocessing resource unavailable.\n"); return; }
     }
-    const int highest = GetHighestEntityIndex();
-    if(highest < 0 || highest > 32768) return;
-    for(int i = 0; i <= highest; ++i) {
-        auto * entity = GetEntityFromIndex(i);
-        if(!entity) continue;
-        const char * name = entity->GetClientClassName();
-        if(!name || strcmp(name, "C_PostProcessingVolume")) continue;
+    for(const auto & cachedHandle : postVolumeHandles) {
+        auto * entity = GetEntityFromIndex(cachedHandle.GetEntryIndex());
+        if(!entity || entity->GetHandle() != cachedHandle) continue;
         auto handle = entity->GetHandle();
         if(!handle.IsValid()) continue;
         auto *** field = reinterpret_cast<void ***>(reinterpret_cast<unsigned char *>(entity) + postSettingsOffset);
@@ -319,6 +340,9 @@ void PrintStatus() {
     advancedfx::Message("[mirv_weather] contact requested=%d active=%d worlds=%zu interface=%d schema=%d.\n",
         wantContact && MirvPovDebug_IsFeatureEnabled("weather_contact"), !contactStates.empty(), contactStates.size(),
         worldFn != nullptr, contactSchemaReady);
+    advancedfx::Message("[mirv_weather] map objects: mapInfo=%zu postVolumes=%zu RTTI=%d/%d; ground requested=%d debug=%d ready=%d.\n",
+        mapInfoHandles.size(), postVolumeHandles.size(), mapInfoVtable != nullptr, postVolumeVtable != nullptr,
+        wantGround, MirvPovDebug_IsFeatureEnabled("weather_ground"), groundReady);
 }
 
 size_t UniqueAddress(HMODULE dll, const char * pattern) {
@@ -333,6 +357,10 @@ size_t UniqueAddress(HMODULE dll, const char * pattern) {
 } // namespace
 
 void MirvWeather_Initialize(HMODULE clientDll) {
+    // These non-networked map classes inherit a base network-class descriptor.
+    // Match their actual dynamic type instead of GetClientClassName().
+    mapInfoVtable = reinterpret_cast<void **>(Afx::BinUtils::FindClassVtable(clientDll, ".?AVCMapInfo@@", 0, 0));
+    postVolumeVtable = reinterpret_cast<void **>(Afx::BinUtils::FindClassVtable(clientDll, ".?AVC_PostProcessingVolume@@", 0, 0));
     managerFn = reinterpret_cast<ManagerFn>(UniqueAddress(clientDll, "48 8B 05 ?? ?? ?? ?? C3 CC CC CC CC CC CC CC CC 48 89 5C 24 10 57"));
     createFn = reinterpret_cast<CreateFn>(UniqueAddress(clientDll, "4C 8B DC 53 48 81 EC ?? ?? ?? ?? F2 0F 10 05"));
     updateFn = reinterpret_cast<UpdateFn>(UniqueAddress(clientDll, "48 89 5C 24 ?? 48 89 74 24 ?? 57 48 83 EC ?? F3 0F 10 1D ?? ?? ?? ?? 41 8B F8 8B DA 4C 8D 05"));
@@ -361,6 +389,9 @@ void MirvWeather_Reset() {
     StopRain();
     RestorePost();
     RestoreContact();
+    mapInfoHandles.clear();
+    postVolumeHandles.clear();
+    lastEntityScan = 0;
     std::unique_lock<std::shared_mutex> lock(materialMutex);
     wetMaterials.clear();
     groundReady = false;
@@ -376,8 +407,9 @@ void MirvWeather_Frame() {
     if(!ReadConfig()) return;
     const int tick = g_pEngineToClient->GetDemoFile()->GetDemoTick();
     // Avoid retaining particle state across a rewind or large demo jump.
-    if(previousTick >= 0 && (tick < previousTick || tick - previousTick > 128)) { StopRain(); RestorePost(); RestoreContact(); }
+    if(previousTick >= 0 && (tick < previousTick || tick - previousTick > 128)) { StopRain(); RestorePost(); RestoreContact(); lastEntityScan = 0; }
     previousTick = tick;
+    DiscoverWeatherEntities();
     if(!rainParticles.empty() && (managerFn() != rainManager
         || FindRecord(rainManager, rainParticles.front().index) != rainParticles.front().record
         || FindRecord(rainManager, rainParticles.back().index) != rainParticles.back().record)) StopRain();

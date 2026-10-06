@@ -246,7 +246,7 @@ jobs:
             "DLL/source build commit: $env:GITHUB_SHA"
             "Build run: https://github.com/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
             'Build: Windows Release x64 success'
-            'CS2: 1.41.8.8 / source revision 11076591'
+            'CS2: 1.41.8.9 / source revision 11087167'
             'Game visual acceptance: pending'
             ('DLL SHA256: ' + (Get-FileHash -LiteralPath stage/x64/AfxHookSource2.dll -Algorithm SHA256).Hash)
           ) | Set-Content -LiteralPath stage/BUILD-INFO.txt -Encoding utf8
