@@ -2,6 +2,7 @@
 #include "AfxBuildInfo.h"
 #include "ClientEntitySystem.h"
 #include "MirvPovCore.h"
+#include "MirvPovMvpMusic.h"
 #include "MirvPovBuyMenu.h"
 #include "MirvPovKillReward.h"
 #include "MirvPovRadar.h"
@@ -231,7 +232,12 @@ CON_COMMAND(mirv_pov_teamid_debug, "Enable rate-limited mirv_pov TeamID diagnost
     advancedfx::Message("Usage: mirv_pov_teamid_debug <0|1>\n");
 }
 
-CON_COMMAND(mirv_pov_debug_feature, "Configure a mirv_pov feature. deafen applies immediately; other features apply on the next enable cycle.")
+CON_COMMAND(mirv_pov_mvp_music_status, "Print MVP music context and event diagnostic counters.")
+{
+    MirvPovMvpMusic_PrintStatus();
+}
+
+CON_COMMAND(mirv_pov_debug_feature, "Configure a mirv_pov feature. Features marked immediate apply now; others apply on the next enable cycle.")
 {
     const int argc = args->ArgC();
     if(1 == argc) {
@@ -272,8 +278,8 @@ CON_COMMAND(mirv_pov_debug_feature, "Configure a mirv_pov feature. deafen applie
 
     advancedfx::Message(
         "Usage: mirv_pov_debug_feature <feature|all> <0|1>\n"
-        "deafen applies immediately; existing audio decays naturally.\n"
-        "Other changes made while enabled apply after mirv_pov 0, then mirv_pov 1.\n");
+        "Features marked immediate apply now; mvp_music affects subsequent MVP events.\n"
+        "Existing audio finishes naturally. Other changes apply after mirv_pov 0, then mirv_pov 1.\n");
     MirvPovDebug_PrintFeatureStates();
 }
 
@@ -393,14 +399,20 @@ CON_COMMAND(mirv_pov_scoreboard, "Sync demo POV scoreboard key to +showscores. D
 	);
 }
 
-CON_COMMAND(mirv_pov_voice, "Enable POV team voice routing and voice HUD synchronization. Enabled by default.")
+CON_COMMAND(mirv_pov_voice, "Select POV player voice routing: team (default), all, enemy, or off.")
 {
 	int argc = args->ArgC();
 	if(2 == argc) {
 		const char * arg1 = args->ArgV(1);
+		if(0 == _stricmp(arg1, "team") || 0 == _stricmp(arg1, "all") || 0 == _stricmp(arg1, "enemy")) {
+			MirvPovVoice_SetMode(0 == _stricmp(arg1, "all") ? MirvPovVoiceMode::All
+				: 0 == _stricmp(arg1, "enemy") ? MirvPovVoiceMode::Enemy : MirvPovVoiceMode::Team);
+			advancedfx::Message("mirv_pov_voice %s.\n", MirvPovVoice_GetModeName());
+			return;
+		}
 		if(0 == _stricmp(arg1, "true") || 0 == _stricmp(arg1, "1") || 0 == _stricmp(arg1, "on")) {
 			MirvPovVoice_SetEnabled(true);
-			advancedfx::Message("mirv_pov_voice enabled.\n");
+			advancedfx::Message("mirv_pov_voice %s.\n", MirvPovVoice_GetModeName());
 			return;
 		}
 		if(0 == _stricmp(arg1, "false") || 0 == _stricmp(arg1, "0") || 0 == _stricmp(arg1, "off")) {
@@ -410,12 +422,16 @@ CON_COMMAND(mirv_pov_voice, "Enable POV team voice routing and voice HUD synchro
 		}
 	}
 	advancedfx::Message(
-		"Usage: mirv_pov_voice true|false\n"
-		"  true  - Resume automatic POV team voice routing and synchronize the voice HUD\n"
-		"  false - Restore the original voice masks and disable synthetic speaking\n"
+		"Usage: mirv_pov_voice team|all|enemy|off\n"
+		"  team  - Listen to the current POV team (default)\n"
+		"  all   - Listen to all players\n"
+		"  enemy - Listen to the opposing playing team\n"
+		"  off   - Restore the original voice masks and disable synthetic speaking\n"
+		"  true/1/on resumes the selected mode; false/0 is an alias for off.\n"
+		"  The voice HUD follows the selected mode; agent radio lines are unaffected.\n"
 		"  Setting tv_listen_voice_indices to 0 while routing disables mirv_pov_voice and clears both voice masks.\n"
 		"Current: %s\n"
-			, MirvPovVoice_IsEnabled() ? "enabled" : "disabled"
+			, MirvPovVoice_GetModeName()
 	);
 }
 
@@ -799,10 +815,12 @@ bool getAddressesFromClient(HMODULE clientDll) {
 		res = false;
 	}
 
-	// Called near "team_intro_end" and "hide_deathpanel" in the 2026-09-23 build.
+	// called in func with "cs_win_panel_match", "cs_game_disconnected", "cs_match_end_restart","nextlevel_changed","hltv_replay" in the end inside if statement
+	// has strings "team_intro_end", "hide_deathpanel"
 	size_t g_Original_EOM_addr = getAddress(clientDll, "48 8B C4 88 50 ?? 55 41 56 48 8B EC 48 83 EC ?? 80 79 ?? 00 4C 8B F1");
 	if(g_Original_EOM_addr == 0) {
-		advancedfx::Warning("AFXWARNING: mirv_endofmatch is unavailable for this CS2 build.\n");
+		ErrorBox(MkErrStr(__FILE__, __LINE__));
+		res = false;
 	}
 
 	// See where spec_show_xray is checked, has offsets to glowProperty
@@ -865,7 +883,7 @@ void HookMirvCommands(HMODULE clientDll) {
     DetourUpdateThread(GetCurrentThread());
 
 	DetourAttach(&(PVOID&)g_Original_OnFlashMaxAlphaChanged, new_OnFlashMaxAlphaChanged);
-	if (g_Original_EOM) DetourAttach(&(PVOID&)g_Original_EOM, new_EOM);
+	DetourAttach(&(PVOID&)g_Original_EOM, new_EOM);
 	DetourAttach(&(PVOID&)g_Original_setGlowProps, new_setGlowProps);
 	DetourAttach(&(PVOID&)org_shouldGlow, new_shouldGlow);
 	DetourAttach(&(PVOID&)org_ForceUpdateSkybox, new_ForceUpdateSkybox);

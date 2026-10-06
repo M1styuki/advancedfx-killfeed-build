@@ -116,6 +116,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     ${AFX_OPENEXR_LINK_LIBRARIES}
     afx_hook_source2
 	dxguid.lib
+    d3dcompiler.lib
     bcrypt.lib # corrosion fails to detect this
     $<$<CONFIG:Debug>:msvcrtd.lib> # corrision messes this up in latest rust version
 )
@@ -240,8 +241,15 @@ target_sources(${PROJECT_NAME} PRIVATE
     ClientEntitySystem.cpp
     ClientEntitySystem.h
 
+    MirvWeather.cpp
+    MirvWeather.h
+    MirvWeatherStorm.cpp
+    MirvWeatherStorm.h
+    MirvWeatherRender.cpp
     MirvPovCore.cpp
     MirvPovCore.h
+    MirvPovMvpMusic.cpp
+    MirvPovMvpMusic.h
     MirvPovBuyMenu.cpp
     MirvPovBuyMenu.h
 
