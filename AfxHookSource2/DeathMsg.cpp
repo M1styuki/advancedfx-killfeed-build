@@ -1752,7 +1752,13 @@ static void __fastcall HandleHudDeathNotice(
 	}
 
 	// Final right-top killfeed decision only. Never notify from DeathPanel or
-	// before filters: a hidden kill must not create weather feedback.
+	// before filters: a hidden kill must not create weather feedback. Kill
+	// lightning requires at least one configured mirv_deathmsg filter rule, so
+	// an empty filter list yields zero kill triggers regardless of any other
+	// setting; demo-time lightning is independent. This runs after the complete
+	// filter loop and the block return, so uidAttacker and uidVictim already
+	// hold the final kept result and the configured block decision is
+	// authoritative here.
 	if(!g_MirvDeathMsgGlobals.Filter.empty() && attackerController && victimController)
 		MirvWeatherStorm_VisibleKill(uidAttacker, uidVictim);
 

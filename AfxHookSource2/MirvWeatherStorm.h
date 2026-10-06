@@ -19,6 +19,3 @@ bool MirvWeatherStorm_SunActive();
 MirvStormGrade MirvWeatherStorm_Grade();
 void MirvWeatherStorm_Render(ID3D11DeviceContext * context);
 void MirvWeatherStorm_RenderStatus();
-bool MirvWeather_SpawnLightning(const float start[3], const float end[3]);
-bool MirvWeather_RetainAudioData();
-void MirvWeather_ReleaseAudioData();

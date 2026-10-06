@@ -95,6 +95,7 @@ std::vector<Particle> rainParticles;
 struct TransientParticle { Particle particle; void * manager; void ** binding; double end; };
 std::vector<TransientParticle> transientParticles;
 std::vector<void **> audioBindings;
+bool lightningWarning = false, audioPrecacheFailed = false;
 void * rainManager = nullptr;
 void ** rainResource = nullptr;
 struct PostBackup { SOURCESDK::CS2::CBaseHandle handle; void ** original; };
@@ -607,6 +608,11 @@ void MirvWeather_Reset() {
     previousTick = -1;
     loadedProfile = nullptr;
     configLoaded = loadAttempted = false;
+    lightningWarning = false;
+    // A resource lookup that failed transiently (for example while the map's
+    // resource system was still warming up) must be retryable; without this a
+    // single failure would disable storm audio until process restart.
+    audioPrecacheFailed = false;
     positions.clear();
     materialEntries.clear();
 }
@@ -655,15 +661,30 @@ bool MirvWeather_SpawnLightning(const float start[3], const float end[3]) {
         updateFn(manager,index,0,&a,0); updateFn(manager,index,1,&b,0);
         transientParticles.push_back({{index,record},manager,binding,time+.8});created=true;
     }
+    if(!created && !lightningWarning) {
+        lightningWarning=true;
+        advancedfx::Warning("[mirv_weather] Native storm lightning particles could not be created; particle lightning left off.\n");
+    }
     return created;
 }
 
 bool MirvWeather_RetainAudioData() {
+    // A failed definition lookup is not retried every frame: the weather
+    // resource pack is static, and per-frame retries would both spam and
+    // repeatedly call the native precache path for the same missing resource.
+    // It is cleared by MirvWeather_Reset instead, so a reload, map change or
+    // master off/on can recover from a transient resource failure.
+    if(audioPrecacheFailed) return false;
     if(!resourcePinLayoutReady || !g_pCResourceSystem) return false;
     if(!audioBindings.empty()) return true;
     for(const char * name:{"soundevents/ambience/game_sounds_train.vsndevts","soundevents/ambience/game_sounds_amb_common.vsndevts"}) {
         auto ** binding=reinterpret_cast<void **>(g_pCResourceSystem->PreCache(name));
-        if(!binding || !*binding) {MirvWeather_ReleaseAudioData();return false;}
+        if(!binding || !*binding) {
+            MirvWeather_ReleaseAudioData();
+            audioPrecacheFailed=true;
+            advancedfx::Warning("[mirv_weather] Native rain/thunder sound definitions unavailable; storm audio left off.\n");
+            return false;
+        }
         RetainBinding(binding);audioBindings.push_back(binding);
     }
     return true;
@@ -672,6 +693,8 @@ void MirvWeather_ReleaseAudioData() {
     for(auto ** binding:audioBindings)ReleaseBinding(binding);
     audioBindings.clear();
 }
+
+void MirvWeather_ClearLightning() { ClearLightning(true); }
 
 bool MirvWeather_HasGroundOverride() { return groundActive.load(); }
 
@@ -702,7 +725,7 @@ CON_COMMAND(mirv_weather, "Seven-map demo rain, native rain contact/environment,
         configLoaded = loadAttempted = false;
         positions.clear(); materialEntries.clear();
     } else if(args->ArgC() != 2 || _stricmp(args->ArgV(1), "status")) {
-        advancedfx::Message("mirv_weather 0|1; mirv_weather rain|ground|postprocess|contact 0|1; mirv_weather status|reload.\nSeven-map offline demos: de_dust2, de_mirage, de_cache, de_inferno, de_ancient, de_nuke, de_anubis. Install the matching resources in HLAE. Native environment: mirv_pov_debug_feature weather_environment 0|1. Sky remains controlled by mirv_sky material.\n");
+        advancedfx::Message("mirv_weather 0|1; mirv_weather rain|ground|postprocess|contact 0|1; mirv_weather status|reload.\nStorm options: mirv_weather storm 0|1; mirv_weather lightning demo|kills|both|off; mirv_weather interval 5..300; mirv_weather sun 0..1; mirv_weather exposure -3..1; mirv_weather rainsound 0..1; mirv_weather thunder 0..1.\nSeven-map offline demos: de_dust2, de_mirage, de_cache, de_inferno, de_ancient, de_nuke, de_anubis. Install the matching resources in HLAE. Native environment: mirv_pov_debug_feature weather_environment 0|1. Storm effects: mirv_pov_debug_feature weather_sun|weather_exposure|weather_grade|weather_lightning|weather_lightning_light|weather_rainsound|weather_thunder 0|1. Sky remains controlled by mirv_sky material.\n");
     }
     MirvWeather_Frame();
     PrintStatus();

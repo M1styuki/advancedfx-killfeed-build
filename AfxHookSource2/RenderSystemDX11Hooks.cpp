@@ -579,6 +579,17 @@ void RenderSystemDX11_DeathFade_ProcessPending() {
     }
 }
 
+bool RenderSystemDX11_DeathFade_IsActive() {
+    // Read-only atomic state, safe from either thread. A POV death fade owns
+    // the whole transition: the request is pending from the death event until
+    // the native black fade is applied, then the applied fade stays active
+    // until it is cleared. Grading and native exposure must stay out of that
+    // entire window instead of relying on a pixel threshold.
+    return g_DeathFadeActive.load(std::memory_order_acquire)
+        || g_DeathFadeClearPending.load(std::memory_order_acquire)
+        || g_DeathFadeDueCurtime.load(std::memory_order_acquire) >= 0.0f;
+}
+
 class CAfxCapture {
 public:
     enum CaptureType_e {
@@ -1935,6 +1946,20 @@ ID3D11DeviceContext * g_pOtherContext = nullptr;
 int g_iDraw = -1;
 int g_iBeforeUi = -1;
 bool g_bInOwnDraw = false;
+// Render targets already graded during the current presented frame. The
+// before-UI marker can commit more than once per frame, and grading the same
+// target twice would apply the look twice; a distinct target still needs its
+// own pass. Entries hold the reference returned by OMGetRenderTargets.
+std::vector<ID3D11RenderTargetView *> g_WeatherGradedTargets;
+
+// Scoped marker for render-thread windows where HLAE submits its own draws.
+// Designated state setters must not record or rewrite that state, so every
+// such window restores the flag even on an early return.
+struct ScopedOwnDraw {
+    bool previous;
+    ScopedOwnDraw() : previous(g_bInOwnDraw) { g_bInOwnDraw = true; }
+    ~ScopedOwnDraw() { g_bInOwnDraw = previous; }
+};
 bool g_bDetectSmoke = false;
 bool g_bDetectSmoke2 = false;
 bool g_bDetectedSmoke = false;
@@ -2277,7 +2302,11 @@ void STDMETHODCALLTYPE New_OMSetBlendState( ID3D11DeviceContext * This,
     /* [annotation] */ 
     _In_  UINT SampleMask) {
 
-    if(g_NoDraw.OnOMSetBlendState(This,pBlendState,BlendFactor,SampleMask))
+    // HLAE's own draws (weather grading, ReShade, campath) set their own blend
+    // state. The colour-blocker must not treat that state as the game's state
+    // to remember and restore, otherwise it replaces the real saved state with
+    // an owned one.
+    if(g_bInOwnDraw || g_NoDraw.OnOMSetBlendState(This,pBlendState,BlendFactor,SampleMask))
         g_Old_OMSetBlendState(This,pBlendState,BlendFactor,SampleMask);
 }
 
@@ -2287,7 +2316,9 @@ void STDMETHODCALLTYPE New_OMSetDepthStencilState(  ID3D11DeviceContext * This,
     /* [annotation] */ 
     _In_  UINT StencilRef) {
 
-    if(g_NoDraw.OnOMSetDepthStencilState(This,pDepthStencilState,StencilRef))
+    // Same rule as New_OMSetBlendState: an owned draw's depth state must reach
+    // D3D and must never be captured as the game's saved depth state.
+    if(g_bInOwnDraw || g_NoDraw.OnOMSetDepthStencilState(This,pDepthStencilState,StencilRef))
         g_Old_OMSetDepthStencilState(This,pDepthStencilState,StencilRef);
 }
 
@@ -2401,9 +2432,22 @@ private:
 };
 
 void BeforeUi(ID3D11DeviceContext * pDeviceContext) {
-    g_bInOwnDraw = true;
-    MirvWeatherStorm_Render(pDeviceContext);
-    g_bInOwnDraw = false;
+    // The before-UI marker can commit more than once per presented frame (for
+    // example a sniper-scope pass followed by PostProcessing). Grade each
+    // distinct render target at most once per frame so a repeated marker cannot
+    // double-apply the storm look to the same target.
+    ID3D11RenderTargetView * pGradeTarget = nullptr;
+    pDeviceContext->OMGetRenderTargets(1, &pGradeTarget, nullptr);
+    if(pGradeTarget) {
+        bool alreadyGraded = false;
+        for(auto * p : g_WeatherGradedTargets) if(p == pGradeTarget) { alreadyGraded = true; break; }
+        if(alreadyGraded) pGradeTarget->Release();
+        else {
+            g_WeatherGradedTargets.push_back(pGradeTarget); // keeps the OMGetRenderTargets reference
+            ScopedOwnDraw ownDraw;
+            MirvWeatherStorm_Render(pDeviceContext);
+        }
+    }
     if (g_ReShadeAdvancedfx.IsConnected() && g_bEnableReShade) {
         float zNear = 0.0f;
         float zFar = 0.0f;
@@ -2426,9 +2470,8 @@ void BeforeUi(ID3D11DeviceContext * pDeviceContext) {
         //if (g_pCurrentDepthStencilView) g_pCurrentDepthStencilView->GetResource(&pDepthStencilResource);
 
         if (ID3D11Resource* pResource = g_DepthCompositor.GetDepthTexture(CDepthCompositor::DepthTextureType_R32F)) {
-            g_bInOwnDraw = true;
+            ScopedOwnDraw ownDraw;
             g_ReShadeAdvancedfx.AdvancedfxRenderEffects(pRenderTargetViewResource, pResource);
-            g_bInOwnDraw = false;
             pResource->Release();
         }
 
@@ -2746,6 +2789,8 @@ void After_Present() {
     g_BeforeUiRT = nullptr;
     g_iDraw = -1;
     g_iBeforeUi = -1;
+    for(auto * p : g_WeatherGradedTargets) p->Release();
+    g_WeatherGradedTargets.clear();
 }
 
 HRESULT STDMETHODCALLTYPE New_Present( void * This,

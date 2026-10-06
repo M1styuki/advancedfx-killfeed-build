@@ -34,3 +34,9 @@ void RenderSystemDX11_DeathFade_ClearForObserverChange();
 void RenderSystemDX11_DeathFade_UpdateObserverState();
 void RenderSystemDX11_DeathFade_ResetObserverState();
 void RenderSystemDX11_DeathFade_ProcessPending();
+
+// Read-only query for the render thread (and the engine thread): true while a
+// POV death fade is pending, applied or being cleared. Used to keep unrelated
+// postprocessing, such as the storm grade and native exposure, out of the whole
+// fade transition.
+bool RenderSystemDX11_DeathFade_IsActive();

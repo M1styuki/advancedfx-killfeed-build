@@ -1,16 +1,16 @@
 #define NOMINMAX
 #include "stdafx.h"
 #include "MirvWeatherStorm.h"
+#include "RenderSystemDX11Hooks.h"
 #include "../shared/AfxConsole.h"
 #include <d3d11.h>
 #include <d3dcompiler.h>
 #include <cstring>
-#include <array>
-#include <algorithm>
 #include <atomic>
 namespace {
 std::atomic<unsigned long long> draws {0};
 std::atomic<long> lastError {0};
+std::atomic<long> lastDrawError {0};
 std::atomic<int> shaderReady {0};
 template<class T> void Drop(T *& p) { if(p) p->Release(); p=nullptr; }
 const char * shader=R"(
@@ -35,55 +35,41 @@ float4 PS(V v):SV_Target {
  return float4(lerp(exposed,src.rgb,protect),src.a);
 })";
 
-struct State {
-    ID3D11RenderTargetView * rtv[8] {}; ID3D11DepthStencilView * dsv=nullptr;
-    ID3D11VertexShader * vs=nullptr; ID3D11PixelShader * ps=nullptr;
-    ID3D11GeometryShader * gs=nullptr; ID3D11HullShader * hs=nullptr; ID3D11DomainShader * ds=nullptr;
-    ID3D11ClassInstance * vi[256] {}, * pi[256] {}, * gi[256] {}, * hi[256] {}, * di[256] {};
-    UINT nv=256,np=256,ng=256,nh=256,nd=256;
-    ID3D11InputLayout * layout=nullptr; D3D11_PRIMITIVE_TOPOLOGY topology {};
-    ID3D11ShaderResourceView * texture=nullptr; ID3D11SamplerState * sampler=nullptr; ID3D11Buffer * buffer=nullptr;
-    ID3D11BlendState * blend=nullptr; FLOAT factor[4] {}; UINT mask=0;
-    ID3D11DepthStencilState * depth=nullptr; UINT stencil=0; ID3D11RasterizerState * raster=nullptr;
-    D3D11_VIEWPORT ports[16] {}; UINT count=16;
-    void Save(ID3D11DeviceContext * c) {
-        c->OMGetRenderTargets(8,rtv,&dsv); c->VSGetShader(&vs,vi,&nv); c->PSGetShader(&ps,pi,&np);
-        c->GSGetShader(&gs,gi,&ng);c->HSGetShader(&hs,hi,&nh);c->DSGetShader(&ds,di,&nd);
-        c->IAGetInputLayout(&layout);c->IAGetPrimitiveTopology(&topology);
-        c->PSGetShaderResources(0,1,&texture);c->PSGetSamplers(0,1,&sampler);c->PSGetConstantBuffers(0,1,&buffer);
-        c->OMGetBlendState(&blend,factor,&mask);c->OMGetDepthStencilState(&depth,&stencil);
-        c->RSGetState(&raster);c->RSGetViewports(&count,ports);
-    }
-    void Restore(ID3D11DeviceContext * c) {
-        ID3D11ShaderResourceView * empty=nullptr;c->PSSetShaderResources(0,1,&empty);
-        c->OMSetRenderTargets(8,rtv,dsv);c->VSSetShader(vs,vi,nv);c->PSSetShader(ps,pi,np);
-        c->GSSetShader(gs,gi,ng);c->HSSetShader(hs,hi,nh);c->DSSetShader(ds,di,nd);
-        c->IASetInputLayout(layout);c->IASetPrimitiveTopology(topology);
-        c->PSSetShaderResources(0,1,&texture);c->PSSetSamplers(0,1,&sampler);c->PSSetConstantBuffers(0,1,&buffer);
-        c->OMSetBlendState(blend,factor,mask);c->OMSetDepthStencilState(depth,stencil);c->RSSetState(raster);c->RSSetViewports(count,ports);
-    }
-    ~State() {
-        for(auto * p:rtv) if(p)p->Release();Drop(dsv);Drop(vs);Drop(ps);Drop(gs);Drop(hs);Drop(ds);
-        for(auto ** list:{vi,pi,gi,hi,di})for(UINT i=0;i<256;++i)if(list[i])list[i]->Release();
-        Drop(layout);Drop(texture);Drop(sampler);Drop(buffer);Drop(blend);Drop(depth);Drop(raster);
-    }
-};
+// The grading pass renders through its own deferred context and is executed on
+// the immediate context with RestoreContextState=TRUE, which makes the runtime
+// save and restore the target context state around the command list (the same
+// mechanism HLAE's campath and depth-compositor passes already rely on) instead
+// of a hand-written backup that could miss a stage or hazard-unbound slot.
+// Recording into a deferred context also keeps HLAE's OMSetRenderTargets /
+// OMSetBlendState / OMSetDepthStencilState blockers from mistaking the owned
+// state for the game's state (deferred contexts use their own implementations,
+// and the render-thread caller additionally marks the window with g_bInOwnDraw).
 struct Drawer {
     ID3D11Device * device=nullptr;
+    ID3D11DeviceContext * deferred=nullptr;
     ID3D11VertexShader * vs=nullptr;ID3D11PixelShader * ps=nullptr;
     ID3D11Buffer * cb=nullptr;ID3D11SamplerState * sampler=nullptr;ID3D11BlendState * blend=nullptr;
     ID3D11DepthStencilState * depth=nullptr;ID3D11RasterizerState * raster=nullptr;
     ID3D11Texture2D * copy=nullptr;ID3D11ShaderResourceView * srv=nullptr;
     D3D11_TEXTURE2D_DESC cached {}; DXGI_FORMAT viewFormat=DXGI_FORMAT_UNKNOWN;
     bool refused=false;
-    void Clear() {Drop(srv);Drop(copy);Drop(vs);Drop(ps);Drop(cb);Drop(sampler);Drop(blend);Drop(depth);Drop(raster);Drop(device);refused=false;cached={};}
+    bool stopped=false;
+    void Clear() {
+        Drop(deferred);Drop(srv);Drop(copy);Drop(vs);Drop(ps);Drop(cb);Drop(sampler);Drop(blend);Drop(depth);Drop(raster);
+        Drop(device);refused=false;stopped=false;cached={};viewFormat=DXGI_FORMAT_UNKNOWN;
+    }
     ~Drawer(){Clear();}
     bool Init(ID3D11Device * d) {
         if(!d)return false;
         if(device!=d){Clear();device=d;device->AddRef();}
-        if(vs&&ps&&cb&&sampler&&blend&&depth&&raster)return true;
+        if(vs&&ps&&cb&&sampler&&blend&&depth&&raster&&deferred)return true;
         if(refused)return false;
         refused=true;
+        // Deferred contexts are required for the isolated pass. Fail closed
+        // (no grading) instead of touching the immediate context state by hand.
+        if(FAILED(d->CreateDeferredContext(0,&deferred)) || !deferred) {
+            lastError.store(E_FAIL);shaderReady.store(-1);return false;
+        }
         ID3DBlob * v=nullptr,*p=nullptr,*error=nullptr;
         HRESULT h=D3DCompile(shader,strlen(shader),"mirv_weather_storm",nullptr,nullptr,"VS","vs_5_0",D3DCOMPILE_ENABLE_STRICTNESS,0,&v,&error);Drop(error);
         if(SUCCEEDED(h))h=D3DCompile(shader,strlen(shader),"mirv_weather_storm",nullptr,nullptr,"PS","ps_5_0",D3DCOMPILE_ENABLE_STRICTNESS,0,&p,&error);Drop(error);
@@ -105,46 +91,91 @@ struct Drawer {
         return true;
     }
     void Draw(ID3D11DeviceContext * c,const MirvStormGrade & g) {
-        State state;state.Save(c); if(!state.rtv[0])return;
-        ID3D11Resource * resource=nullptr;state.rtv[0]->GetResource(&resource);
+        // Read the current target without modifying any immediate-context state.
+        ID3D11RenderTargetView * rtv=nullptr;
+        c->OMGetRenderTargets(1,&rtv,nullptr);
+        if(!rtv)return;
+        ID3D11Resource * resource=nullptr;rtv->GetResource(&resource);
         ID3D11Texture2D * target=nullptr;
         if(resource)resource->QueryInterface(__uuidof(ID3D11Texture2D),reinterpret_cast<void **>(&target));Drop(resource);
-        if(!target)return;
+        if(!target){rtv->Release();return;}
         D3D11_TEXTURE2D_DESC desc {};target->GetDesc(&desc);
-        D3D11_RENDER_TARGET_VIEW_DESC rd {};state.rtv[0]->GetDesc(&rd);
+        D3D11_RENDER_TARGET_VIEW_DESC rd {};rtv->GetDesc(&rd);
         switch(rd.Format) {
         case DXGI_FORMAT_R8G8B8A8_UNORM: case DXGI_FORMAT_R8G8B8A8_UNORM_SRGB:
         case DXGI_FORMAT_B8G8R8A8_UNORM: case DXGI_FORMAT_B8G8R8A8_UNORM_SRGB:
         case DXGI_FORMAT_R10G10B10A2_UNORM: case DXGI_FORMAT_R16G16B16A16_FLOAT:
         case DXGI_FORMAT_R11G11B10_FLOAT: break;
-        default:Drop(target);return; // never grade depth/data/cubemap captures
+        default:Drop(target);rtv->Release();return; // never grade depth/data/cubemap captures
         }
-        if(desc.SampleDesc.Count!=1 || desc.ArraySize!=1 || desc.MipLevels!=1 || rd.ViewDimension!=D3D11_RTV_DIMENSION_TEXTURE2D){Drop(target);return;}
-        ID3D11Device * d=nullptr;c->GetDevice(&d);const bool ready=Init(d);Drop(d);if(!ready){Drop(target);return;}
+        if(desc.SampleDesc.Count!=1 || desc.ArraySize!=1 || desc.MipLevels!=1 || rd.ViewDimension!=D3D11_RTV_DIMENSION_TEXTURE2D){Drop(target);rtv->Release();return;}
+        ID3D11Device * d=nullptr;c->GetDevice(&d);const bool ready=Init(d);Drop(d);if(!ready || stopped){Drop(target);rtv->Release();return;}
         if(!copy || cached.Width!=desc.Width || cached.Height!=desc.Height || cached.Format!=desc.Format || viewFormat!=rd.Format) {
             Drop(srv);Drop(copy);cached=desc;viewFormat=rd.Format;
             desc.Usage=D3D11_USAGE_DEFAULT;desc.BindFlags=D3D11_BIND_SHADER_RESOURCE;desc.CPUAccessFlags=0;desc.MiscFlags=0;
-            if(FAILED(device->CreateTexture2D(&desc,nullptr,&copy))){Drop(target);return;}
+            if(FAILED(device->CreateTexture2D(&desc,nullptr,&copy))){Drop(target);rtv->Release();return;}
             D3D11_SHADER_RESOURCE_VIEW_DESC vd {};vd.Format=rd.Format;vd.ViewDimension=D3D11_SRV_DIMENSION_TEXTURE2D;vd.Texture2D.MipLevels=1;
-            if(FAILED(device->CreateShaderResourceView(copy,&vd,&srv))){Drop(copy);Drop(target);return;}
+            if(FAILED(device->CreateShaderResourceView(copy,&vd,&srv))){Drop(copy);Drop(target);rtv->Release();return;}
         }
+        // The immediate context may be predicated. Draw and CopyResource honour
+        // predication, so a false predicate would skip the copy and/or the owned
+        // draw. Clear predication for the whole copy+execute window and restore
+        // the exact previous state afterwards. Map/Unmap are state-neutral and
+        // are not predicated.
+        ID3D11Predicate * predicate=nullptr;BOOL predicateValue=FALSE;
+        c->GetPredication(&predicate,&predicateValue);
+        if(predicate)c->SetPredication(nullptr,FALSE);
         D3D11_MAPPED_SUBRESOURCE mapped {};
-        if(FAILED(c->Map(cb,0,D3D11_MAP_WRITE_DISCARD,0,&mapped))){Drop(target);return;}
+        if(FAILED(c->Map(cb,0,D3D11_MAP_WRITE_DISCARD,0,&mapped))) {
+            if(predicate){c->SetPredication(predicate,predicateValue);predicate->Release();}
+            Drop(target);rtv->Release();return;
+        }
         float values[8]={g.exposure,g.saturation,g.highlight,g.cool,g.shadows,g.flash,0,0};memcpy(mapped.pData,values,sizeof(values));c->Unmap(cb,0);
-        c->OMSetRenderTargets(0,nullptr,nullptr);c->CopyResource(copy,target);Drop(target);
-        c->OMSetRenderTargets(1,state.rtv,nullptr);c->OMSetBlendState(blend,nullptr,0xffffffff);c->OMSetDepthStencilState(depth,0);
-        c->RSSetState(raster);D3D11_VIEWPORT port {0,0,static_cast<float>(cached.Width),static_cast<float>(cached.Height),0,1};c->RSSetViewports(1,&port);
-        c->IASetInputLayout(nullptr);c->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-        c->VSSetShader(vs,nullptr,0);c->PSSetShader(ps,nullptr,0);c->GSSetShader(nullptr,nullptr,0);c->HSSetShader(nullptr,nullptr,0);c->DSSetShader(nullptr,nullptr,0);
-        c->PSSetShaderResources(0,1,&srv);c->PSSetSamplers(0,1,&sampler);c->PSSetConstantBuffers(0,1,&cb);c->Draw(3,0);draws.fetch_add(1);
-        state.Restore(c);
+        c->CopyResource(copy,target);Drop(target);
+        D3D11_VIEWPORT port {0,0,static_cast<float>(cached.Width),static_cast<float>(cached.Height),0,1};
+        deferred->OMSetRenderTargets(1,&rtv,nullptr);
+        deferred->OMSetBlendState(blend,nullptr,0xffffffff);
+        deferred->OMSetDepthStencilState(depth,0);
+        deferred->RSSetState(raster);
+        deferred->RSSetViewports(1,&port);
+        deferred->IASetInputLayout(nullptr);
+        deferred->IASetPrimitiveTopology(D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        deferred->VSSetShader(vs,nullptr,0);
+        deferred->PSSetShader(ps,nullptr,0);
+        deferred->GSSetShader(nullptr,nullptr,0);
+        deferred->HSSetShader(nullptr,nullptr,0);
+        deferred->DSSetShader(nullptr,nullptr,0);
+        deferred->PSSetShaderResources(0,1,&srv);
+        deferred->PSSetSamplers(0,1,&sampler);
+        deferred->PSSetConstantBuffers(0,1,&cb);
+        deferred->Draw(3,0);
+        ID3D11CommandList * list=nullptr;
+        const HRESULT finish=deferred->FinishCommandList(FALSE,&list);
+        if(SUCCEEDED(finish) && list) {
+            c->ExecuteCommandList(list,TRUE); // saves and restores the immediate-context state
+            draws.fetch_add(1);
+        } else {
+            // Fail closed: a command list that cannot be closed would be merged
+            // into the next recording, so stop grading for this device instead.
+            lastDrawError.store(SUCCEEDED(finish)?E_POINTER:finish);
+            stopped=true;
+        }
+        if(list)list->Release();
+        if(predicate){c->SetPredication(predicate,predicateValue);predicate->Release();}
+        rtv->Release();
     }
 } drawer;
 }
 void MirvWeatherStorm_Render(ID3D11DeviceContext * context) {
-    const auto params=MirvWeatherStorm_Grade();if(context && params.active)drawer.Draw(context,params);
+    const auto params=MirvWeatherStorm_Grade();if(context && params.active) {
+        // A POV death fade must survive as a transition, not only as exact
+        // black. The grade (and native exposure, restored by the controller) is
+        // skipped for the whole fade so the fade colour ramp is untouched.
+        if(RenderSystemDX11_DeathFade_IsActive()) return;
+        drawer.Draw(context,params);
+    }
 }
 void MirvWeatherStorm_RenderStatus() {
-    advancedfx::Message("[mirv_weather] grade shader=%d draws=%llu error=0x%08x (before HUD).\n",
-        shaderReady.load(),draws.load(),static_cast<unsigned>(lastError.load()));
+    advancedfx::Message("[mirv_weather] grade shader=%d draws=%llu error=0x%08x drawerror=0x%08x (isolated before-HUD pass).\n",
+        shaderReady.load(),draws.load(),static_cast<unsigned>(lastError.load()),static_cast<unsigned>(lastDrawError.load()));
 }

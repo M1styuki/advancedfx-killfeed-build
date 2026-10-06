@@ -9,6 +9,7 @@
 #include "SchemaSystem.h"
 #include "ClientEntitySystem.h"
 #include "DeathMsg.h"
+#include "RenderSystemDX11Hooks.h"
 #include "WrpConsole.h"
 #include "../shared/binutils.h"
 #include "../deps/release/prop/cs2/sdk_src/public/cdll_int.h"
@@ -104,9 +105,9 @@ void ApplyFloat(const SOURCESDK::CS2::CBaseHandle & handle, void * object, bool 
     if(*value!=desired) { *value=desired; if(light) RefreshLight(object); }
     it->applied=desired;
 }
-void Fire(double time, bool kill) {
+void Fire(double time, bool kill, unsigned count = 1) {
     flashStart=time; thunderAt=time+(kill?.22:1.0);
-    if(kill) ++killFlashes; else ++demoFlashes;
+    if(kill) killFlashes+=count; else demoFlashes+=count;
     const double yaw=g_CurrentGameCamera.angles[1]*3.141592653589793/180;
     float end[3]={static_cast<float>(g_CurrentGameCamera.origin[0]+std::cos(yaw)*1800),
         static_cast<float>(g_CurrentGameCamera.origin[1]+std::sin(yaw)*1800),static_cast<float>(g_CurrentGameCamera.origin[2]+1000)};
@@ -143,6 +144,10 @@ void MirvWeatherStorm_ResolveSchema() {
 void MirvWeatherStorm_Reset() {
     active.store(false); hideSun.store(false); PublishGrade({0,1,0,0,0,0,false});
     Restore(lights,true); Restore(exposures,false);
+    // Owned transient particles cannot outlive a storm reset: destroy them
+    // synchronously and release their retained definition bindings here rather
+    // than waiting for demo-time expiry (which is frozen while paused).
+    MirvWeather_ClearLightning();
     MirvPovSoundCircle_StopOwnedSound(rainSound); MirvPovSoundCircle_StopOwnedSound(thunderSound);
     MirvWeather_ReleaseAudioData();audioPrecached=false;
     {std::lock_guard<std::mutex> lock(stateMutex); pending.clear(); recent.clear();}
@@ -156,8 +161,12 @@ void MirvWeatherStorm_VisibleKill(int attacker,int victim) {
     Kill k {demo->GetDemoTick(),attacker,victim};
     std::lock_guard<std::mutex> lock(stateMutex);
     for(const auto & e:recent) if(e.tick==k.tick && e.attacker==attacker && e.victim==victim) return;
+    // The pending queue is a hard per-frame bound. An event dropped because the
+    // bound is reached is intentionally NOT marked as handled: it must not be
+    // silently deduplicated before it has actually been enqueued.
+    if(pending.size()>=16) return;
     recent.push_back(k); if(recent.size()>64) recent.pop_front();
-    if(pending.size()<16) pending.push_back(k);
+    pending.push_back(k);
 }
 void MirvWeatherStorm_Frame(bool masterActive) {
     if(!masterActive || !enabled) { if(wasActive) MirvWeatherStorm_Reset(); return; }
@@ -165,6 +174,18 @@ void MirvWeatherStorm_Frame(bool masterActive) {
     if(previousTime>=0 && (time<previousTime || time-previousTime>2)) MirvWeatherStorm_Reset();
     wasActive=true; active.store(true); Scan();
     const bool paused=g_pEngineToClient->GetDemoFile()->IsDemoPaused();
+    // A POV death fade owns the whole transition, not only exact black. Query
+    // the render-thread state so grading and native exposure stay out of it.
+    const bool faded=RenderSystemDX11_DeathFade_IsActive();
+    if(paused) {
+        // Demo time is frozen while paused, so time-based transient expiry can
+        // never run. Destroy owned lightning synchronously and never resume a
+        // stale flash or a delayed thunder after unpause.
+        MirvWeather_ClearLightning();
+        MirvPovSoundCircle_StopOwnedSound(thunderSound);
+        thunderAt=-1; flashStart=-100;
+        { std::lock_guard<std::mutex> lock(stateMutex); pending.clear(); }
+    }
     const long long cell=static_cast<long long>(std::floor(time/period));
     const bool feedback=Feature("weather_lightning") || Feature("weather_lightning_light") || Feature("weather_thunder");
     if(!paused && ambientCell>=0 && cell!=ambientCell && (trigger&1) && feedback) Fire(time,false);
@@ -172,14 +193,19 @@ void MirvWeatherStorm_Frame(bool masterActive) {
     std::deque<Kill> kills;
     { std::lock_guard<std::mutex> lock(stateMutex); kills.swap(pending); }
     if(!paused && (trigger&2) && feedback) {
-        for(const auto & k:kills) if(k.tick==g_pEngineToClient->GetDemoFile()->GetDemoTick()
-            || std::abs(k.tick-g_pEngineToClient->GetDemoFile()->GetDemoTick())<=128) Fire(time,true);
+        const int tick=g_pEngineToClient->GetDemoFile()->GetDemoTick();
+        unsigned burst=0;
+        for(const auto & k:kills) if(k.tick==tick || std::abs(k.tick-tick)<=128) ++burst;
+        // One kept kill, or a bounded multi-kill burst inside the accepted tick
+        // window, becomes a single flash with a single delayed thunder; every
+        // accepted kill still increments the counter.
+        if(burst) Fire(time,true,burst);
     }
     const double elapsed=time-flashStart;
     float flash=0;
-    if(Feature("weather_lightning_light") && elapsed>=0 && elapsed<.45)
+    if(!paused && !faded && Feature("weather_lightning_light") && elapsed>=0 && elapsed<.45)
         flash=static_cast<float>((elapsed<.08?1:(elapsed<.14?.15:(elapsed<.22?.7:0)))*std::exp(-elapsed*4));
-    const bool flashed=InFlash();
+    const bool flashed=InFlash() || faded;
     if(sunSchemaReady && updateLight && lightManagerSlot && *lightManagerSlot
         && (Feature("weather_sun") || flash>0)) {
         for(const auto & h:lightHandles) {
@@ -200,10 +226,17 @@ void MirvWeatherStorm_Frame(bool masterActive) {
     PublishGrade({adjustExposure?(exposures.empty()?exposure:exposure*.5f):0,
         grading?.9f:1,grading?.13f:0,grading?.025f:0,grading?.025f:0,flash*.2f,
         !flashed&&(grading||adjustExposure||flash>0)});
-    if(!soundInitialized && (Feature("weather_rainsound") || Feature("weather_thunder"))) {
+    // The native sound hooks are shared with the POV sound-circle, but every
+    // POV behavior behind them is still gated by its own soundcircle feature.
+    // Initializing them for storm audio therefore does not enable POV audio
+    // overriding (see doc/notes/seven-map-storm-native.md).
+    const bool wantAudio=Feature("weather_rainsound") || Feature("weather_thunder");
+    if(!soundInitialized && wantAudio) {
         soundInitialized=true; MirvPovSoundCircle_Initialize(clientModule);
     }
-    if(!audioPrecached) audioPrecached=MirvWeather_RetainAudioData();
+    // Retain the sound definitions only while at least one storm sound feature
+    // needs them; a failed lookup is reported and not retried every frame.
+    if(wantAudio && !audioPrecached) audioPrecached=MirvWeather_RetainAudioData();
     if(audioPrecached && !paused && Feature("weather_rainsound") && rainVolume>0) {
         if(!rainSound.system || lastRainVolume!=rainVolume) {
             if(MirvPovSoundCircle_StartOwnedSound("train.Outside_TSpawn.Rain",rainVolume,rainSound)) lastRainVolume=rainVolume;
@@ -211,11 +244,15 @@ void MirvWeatherStorm_Frame(bool masterActive) {
         }
     } else {MirvPovSoundCircle_StopOwnedSound(rainSound); lastRainVolume=-1;}
     if(!Feature("weather_thunder") || thunderVolume<=0) {MirvPovSoundCircle_StopOwnedSound(thunderSound);thunderAt=-1;}
-    if(paused) MirvPovSoundCircle_StopOwnedSound(thunderSound);
     if(!paused && thunderAt>=0 && time>=thunderAt) {
         if(audioPrecached && Feature("weather_thunder") && thunderVolume>0)
             MirvPovSoundCircle_StartOwnedSound("Weather.thunder_close_1",thunderVolume,thunderSound);
         thunderAt=-1;
+    }
+    // Release definitions only after both owned playback instances have stopped.
+    if(!wantAudio && audioPrecached) {
+        MirvWeather_ReleaseAudioData();
+        audioPrecached=false;
     }
 }
 MirvStormGrade MirvWeatherStorm_Grade() {std::lock_guard<std::mutex> lock(stateMutex);return grade;}
