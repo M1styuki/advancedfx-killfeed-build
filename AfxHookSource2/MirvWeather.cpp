@@ -2,6 +2,8 @@
 #define NOMINMAX
 #include "stdafx.h"
 #include "MirvWeather.h"
+#include "MirvWeatherStorm.h"
+#include "MirvTime.h"
 #include "Globals.h"
 #include "SceneSystem.h"
 #include "SchemaSystem.h"
@@ -90,6 +92,9 @@ struct MaterialEntry { std::string original, wet; };
 std::vector<MaterialEntry> materialEntries;
 struct Particle { int index; void * record; };
 std::vector<Particle> rainParticles;
+struct TransientParticle { Particle particle; void * manager; void ** binding; double end; };
+std::vector<TransientParticle> transientParticles;
+std::vector<void **> audioBindings;
 void * rainManager = nullptr;
 void ** rainResource = nullptr;
 struct PostBackup { SOURCESDK::CS2::CBaseHandle handle; void ** original; };
@@ -174,6 +179,19 @@ void RestorePost() {
     }
     for(const auto & b : postBackups) ReleaseBinding(b.original);
     postBackups.clear();
+}
+
+void ClearLightning(bool all) {
+    double time=0; g_MirvTime.GetCurrentDemoTime(time);
+    void * current=managerFn?managerFn():nullptr;
+    for(auto it=transientParticles.begin();it!=transientParticles.end();) {
+        if(all || time>=it->end || !MirvPovDebug_IsFeatureEnabled("weather_lightning") || current!=it->manager) {
+            if(destroyFn && current==it->manager && FindRecord(current,it->particle.index)==it->particle.record)
+                destroyFn(current,it->particle.index,true,true);
+            ReleaseBinding(it->binding);
+            it=transientParticles.erase(it);
+        } else ++it;
+    }
 }
 
 bool ReadContact(CEntityInstance * entity, uint32_t & group, bool & enabled) {
@@ -511,6 +529,7 @@ void PrintStatus() {
     advancedfx::Message("[mirv_weather] environment requested=%d worlds=%zu interface=%d schema=%d; ground profile=%s.\n",
         MirvPovDebug_IsFeatureEnabled("weather_environment"), environmentStates.size(), environmentSignatureReady,
         environmentSchemaReady, profile && profile->materialCount ? "wet-materials" : "native-ground");
+    MirvWeatherStorm_Status();
 }
 
 size_t UniqueAddress(HMODULE dll, const char * pattern) {
@@ -525,6 +544,7 @@ size_t UniqueAddress(HMODULE dll, const char * pattern) {
 } // namespace
 
 void MirvWeather_Initialize(HMODULE clientDll) {
+    MirvWeatherStorm_Initialize(clientDll);
     if(HMODULE resources = GetModuleHandleA("resourcesystem.dll"))
         resourcePinLayoutReady = 0 != UniqueAddress(resources, "8B 43 20 85 C0 0F 84 ?? ?? ?? ?? 48 0F BE 43 1C 48 83 C5 D0 3C FF");
     postLifetimeLayoutReady = 0 != UniqueAddress(clientDll, "48 8B 91 90 11 00 00 48 85 D2 74 ?? 48 83 3D ?? ?? ?? ?? 00 74 ?? F0 FF 4A 20");
@@ -546,6 +566,7 @@ void MirvWeather_Initialize(HMODULE clientDll) {
 }
 
 void MirvWeather_ResolveSchemaOffsets() {
+    MirvWeatherStorm_ResolveSchema();
     // HookSchemaSystem clears the temporary schema table after initialization.
     // Resolve optional weather fields while that table is still populated.
     getOffset(&postSettingsOffset, "client.dll", "C_PostProcessingVolume", "m_hPostSettings");
@@ -563,6 +584,8 @@ void MirvWeather_ResolveSchemaOffsets() {
 }
 
 void MirvWeather_Reset() {
+    MirvWeatherStorm_Reset();
+    ClearLightning(true);
     groundActive.store(false);
     StopRain();
     RestorePost();
@@ -599,7 +622,7 @@ void MirvWeather_Frame() {
     if(!ReadConfig()) return;
     const int tick = g_pEngineToClient->GetDemoFile()->GetDemoTick();
     // Avoid retaining particle state across a rewind or large demo jump.
-    if(previousTick >= 0 && (tick < previousTick || tick - previousTick > 128)) { StopRain(); RestorePost(); RestoreEnvironment(); RestoreContact(); lastEntityScan = 0; }
+    if(previousTick >= 0 && (tick < previousTick || tick - previousTick > 128)) { MirvWeatherStorm_Reset(); ClearLightning(true); StopRain(); RestorePost(); RestoreEnvironment(); RestoreContact(); lastEntityScan = 0; }
     previousTick = tick;
     DiscoverWeatherEntities();
     if(!rainParticles.empty() && (managerFn() != rainManager
@@ -611,6 +634,43 @@ void MirvWeather_Frame() {
     if(wantPost && MirvPovDebug_IsFeatureEnabled("weather_postprocess")) ApplyPost(); else RestorePost();
     if(MirvPovDebug_IsFeatureEnabled("weather_environment")) ApplyEnvironment(); else RestoreEnvironment();
     if(wantContact && MirvPovDebug_IsFeatureEnabled("weather_contact")) ApplyContact(); else RestoreContact();
+    ClearLightning(false);
+    MirvWeatherStorm_Frame(true);
+}
+
+bool MirvWeather_SpawnLightning(const float start[3], const float end[3]) {
+    if(!requested || !loadedProfile || !configLoaded || !resourcePinLayoutReady || !managerFn || !createFn || !updateFn || !destroyFn || !g_pCResourceSystem) return false;
+    if(transientParticles.size()>=8) ClearLightning(true);
+    void * manager=managerFn(); if(!manager) return false;
+    double time=0; if(!g_MirvTime.GetCurrentDemoTime(time)) return false;
+    bool created=false;
+    for(const char * name:{"particles/rain_fx/storm_lightning_01_cloud.vpcf","particles/rain_fx/storm_lightning_01_thin.vpcf"}) {
+        void ** binding=reinterpret_cast<void **>(g_pCResourceSystem->PreCache(name));
+        if(!binding || !*binding) continue;
+        RetainBinding(binding);
+        int index=-1; createFn(manager,&index,name,8,0,0,0,0);
+        void * record=FindRecord(manager,index);
+        if(index<0 || !record) {ReleaseBinding(binding);continue;}
+        Vec3 a {start[0],start[1],start[2]}, b {end[0],end[1],end[2]};
+        updateFn(manager,index,0,&a,0); updateFn(manager,index,1,&b,0);
+        transientParticles.push_back({{index,record},manager,binding,time+.8});created=true;
+    }
+    return created;
+}
+
+bool MirvWeather_RetainAudioData() {
+    if(!resourcePinLayoutReady || !g_pCResourceSystem) return false;
+    if(!audioBindings.empty()) return true;
+    for(const char * name:{"soundevents/ambience/game_sounds_train.vsndevts","soundevents/ambience/game_sounds_amb_common.vsndevts"}) {
+        auto ** binding=reinterpret_cast<void **>(g_pCResourceSystem->PreCache(name));
+        if(!binding || !*binding) {MirvWeather_ReleaseAudioData();return false;}
+        RetainBinding(binding);audioBindings.push_back(binding);
+    }
+    return true;
+}
+void MirvWeather_ReleaseAudioData() {
+    for(auto ** binding:audioBindings)ReleaseBinding(binding);
+    audioBindings.clear();
 }
 
 bool MirvWeather_HasGroundOverride() { return groundActive.load(); }
@@ -625,7 +685,9 @@ CMaterial2 * MirvWeather_Material(CMaterial2 * original) {
 }
 
 CON_COMMAND(mirv_weather, "Seven-map demo rain, native rain contact/environment, wet ground and postprocessing") {
-    if(args->ArgC() == 2 && (!strcmp(args->ArgV(1), "0") || !strcmp(args->ArgV(1), "1"))) {
+    if(MirvWeatherStorm_Command(args)) {
+        // Storm options are independent of the base rain/ground profile.
+    } else if(args->ArgC() == 2 && (!strcmp(args->ArgV(1), "0") || !strcmp(args->ArgV(1), "1"))) {
         requested = args->ArgV(1)[0] == '1';
         if(!requested) MirvWeather_Reset();
     } else if(args->ArgC() == 3 && (!strcmp(args->ArgV(2), "0") || !strcmp(args->ArgV(2), "1"))) {

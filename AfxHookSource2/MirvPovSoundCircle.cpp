@@ -53,6 +53,9 @@ GetLocalPawn_t g_OrgGetLocalPawn = nullptr;
 GetLocalPawn_t g_OrgGetSoundViewPawn = nullptr;
 DoStartSoundEvent_t g_OrgDoStartSoundEvent = nullptr;
 StartSoundEvent_t g_StartSoundEvent = nullptr;
+using StopOwnedSound_t = void (__fastcall *)(void *, void *, int);
+StopOwnedSound_t g_StopOwnedSound = nullptr;
+void ** g_OwnedSoundSystemSlot = nullptr;
 QueueRadarSound_t g_QueueRadarSound = nullptr;
 void ** g_SoundEventInterfaceSlot = nullptr;
 void * g_SoundGateReturnAddresses[3] = {};
@@ -394,6 +397,16 @@ void MirvPovSoundCircle_Initialize(HMODULE clientDll)
     size_t startSoundEvent = getAddress(
         clientDll,
         "48 89 5C 24 10 48 89 6C 24 18 48 89 74 24 20 57 41 56 41 57 48 83 EC 60 48 8B 05 ?? ?? ?? ?? 48 8B FA 48 8D 15");
+    size_t stopSite = getAddress(clientDll,
+        "48 8D 9F A0 06 00 00 39 33 74 ?? 48 8B 0D ?? ?? ?? ?? 45 33 C0 48 8B D3 E8 ?? ?? ?? ??");
+    if(stopSite) {
+        auto * stop = reinterpret_cast<unsigned char *>(stopSite + 29 + *reinterpret_cast<int32_t *>(stopSite + 25));
+        const unsigned char expected[] = {0x53,0x48,0x83,0xec,0x20,0x83,0x3a,0x00,0x48,0x8b,0xda,0x74};
+        if(0 == memcmp(stop, expected, sizeof(expected))) {
+            g_StopOwnedSound = reinterpret_cast<StopOwnedSound_t>(stop);
+            g_OwnedSoundSystemSlot = reinterpret_cast<void **>(stopSite + 18 + *reinterpret_cast<int32_t *>(stopSite + 14));
+        }
+    }
     uint8_t * createSoundEventCall = reinterpret_cast<uint8_t *>(doStartSoundEvent) + 0xec;
     if(0xe8 != createSoundEventCall[0]) {
         MIRV_POV_DIAGNOSTIC_WARNING("[mirv_pov_sound_circle] Native SOS create-sound call validation failed.\n");
@@ -598,4 +611,39 @@ bool MirvPovSoundCircle_EmitSoundGlobal(const char * soundName)
     // separate entry point makes the original-global and optional spatialized
     // fallback behaviors explicit at the radio layer.
     return MirvPovSoundCircle_EmitSoundAtEntity(soundName, -1);
+}
+
+bool MirvPovSoundCircle_StartOwnedSound(const char * name, float volume, MirvOwnedSound & sound)
+{
+    if(!name || !g_StartSoundEvent || !g_StopOwnedSound || !g_OwnedSoundSystemSlot
+        || volume <= 0.0f || volume > 1.0f) return false;
+    MirvPovSoundCircle_StopOwnedSound(sound);
+    void * iface = nullptr;
+    ResolveSoundEventId_t resolve = nullptr;
+    IsSoundEventValid_t valid = nullptr;
+    GetSoundEventName_t canonical = nullptr;
+    if(!ReadSoundEventInterface(iface, resolve, valid, canonical)) return false;
+    __try {
+        void * system = *g_OwnedSoundSystemSlot;
+        if(!system) return false;
+        uint32_t id = resolve(iface, name, true);
+        if(!id || !valid(iface, id)) return false;
+        alignas(16) unsigned char result[0x40] {};
+        g_StartSoundEvent(system, result, nullptr, id, static_cast<uint32_t>(-1), -1, static_cast<double>(volume));
+        if(!*reinterpret_cast<uint32_t *>(result)) return false;
+        memcpy(sound.guid, result, sizeof(sound.guid));
+        sound.system = system;
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) { return false; }
+}
+
+void MirvPovSoundCircle_StopOwnedSound(MirvOwnedSound & sound)
+{
+    __try {
+        if(g_StopOwnedSound && g_OwnedSoundSystemSlot && sound.system
+            && *g_OwnedSoundSystemSlot == sound.system && *reinterpret_cast<uint32_t *>(sound.guid))
+            g_StopOwnedSound(sound.system, sound.guid, 0);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    memset(sound.guid, 0, sizeof(sound.guid));
+    sound.system = nullptr;
 }

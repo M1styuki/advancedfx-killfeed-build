@@ -29,6 +29,7 @@
 #include "MirvPovCore.h"
 #include "MirvPovMvpMusic.h"
 #include "MirvTime.h"
+#include "MirvWeatherStorm.h"
 
 #include "addresses.h"
 
@@ -1749,6 +1750,11 @@ static void __fastcall HandleHudDeathNotice(
 	if (myWrapper.block.use && myWrapper.block.value) {
 		return;
 	}
+
+	// Final right-top killfeed decision only. Never notify from DeathPanel or
+	// before filters: a hidden kill must not create weather feedback.
+	if(!g_MirvDeathMsgGlobals.Filter.empty() && attackerController && victimController)
+		MirvWeatherStorm_VisibleKill(uidAttacker, uidVictim);
 
 	if (g_MirvDeathMsgGlobals.useHighlightId)
 	{

@@ -21,3 +21,9 @@ bool MirvPovSoundCircle_EmitSoundAtEntity(const char * soundName, int sourceEnti
 // Emit the same native CS2 sound-event path with entidx=-1, matching the
 // original SendAudio/RawAudio user-message behavior (global, non-spatialized).
 bool MirvPovSoundCircle_EmitSoundGlobal(const char * soundName);
+
+// Owned weather sounds use only the verified direct path and return their GUID.
+// Stop affects that GUID only, never the game's unrelated audio.
+struct MirvOwnedSound { unsigned char guid[20] {}; void * system = nullptr; };
+bool MirvPovSoundCircle_StartOwnedSound(const char * name, float volume, MirvOwnedSound & sound);
+void MirvPovSoundCircle_StopOwnedSound(MirvOwnedSound & sound);

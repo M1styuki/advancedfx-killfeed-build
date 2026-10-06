@@ -6,6 +6,7 @@
 #include "MirvColors.h"
 #include "StreamSettings.h"
 #include "MirvWeather.h"
+#include "MirvWeatherStorm.h"
 
 #include "../shared/StringTools.h"
 #include "../deps/release/Detours/src/detours.h"
@@ -944,6 +945,8 @@ static SceneObjectDrawPolicy GetSceneDataPolicy(SceneObjectFilterClass filterCla
 		return ApplyLayerAwarePolicy(filterClass, context, nullptr, GetSceneObjectClassPolicy(filterClass));
 	}
 
+	if(MirvWeatherStorm_HideSun(materialName)) return SceneObjectDrawPolicy::Hide;
+
 	// Custom Sky related:
 	//
 	// There is some z fight going on, when camera is pointed to sun
@@ -1133,7 +1136,7 @@ typedef void (__fastcall * DrawCurrentPrimitives_t)(void * pDrawingData);
 DrawCurrentPrimitives_t org_DrawCurrentPrimitives = nullptr;
 
 void DrawWeatherSceneData(void * drawingData, CBaseSceneData * sceneData) {
-	if(!MirvWeather_HasGroundOverride()) { org_DrawSceneData(drawingData, sceneData); return; }
+    if(!MirvWeather_HasGroundOverride() && !MirvWeatherStorm_SunActive()) { org_DrawSceneData(drawingData, sceneData); return; }
 	bool worldLayout = false;
 	if(sceneData && sceneData->sceneObject && g_SceneObject_pSceneObjectDesc_Offset != size_t(-1)) {
 		if(void * desc = *(void **)((unsigned char *)sceneData->sceneObject + g_SceneObject_pSceneObjectDesc_Offset)) {
@@ -1141,6 +1144,13 @@ void DrawWeatherSceneData(void * drawingData, CBaseSceneData * sceneData) {
 			worldLayout = it != g_VtableToSceneObjectFilterClass.end()
 				&& (it->second == SceneObjectFilterClass::Base || it->second == SceneObjectFilterClass::Aggregate);
 		}
+	}
+	if(worldLayout && sceneData->material && drawingData && org_DrawCurrentPrimitives
+		&& MirvWeatherStorm_HideSun(sceneData->material->GetName())) {
+		// Flush before skipping a record so native contiguous batches cannot
+		// accidentally include the hidden sun card in a later merged draw.
+		org_DrawCurrentPrimitives(drawingData);
+		return;
 	}
 	CMaterial2 * wet = worldLayout ? MirvWeather_Material(sceneData->material) : nullptr;
 	if(sceneData && wet && wet != sceneData->material && drawingData && org_DrawCurrentPrimitives) {

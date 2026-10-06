@@ -1,4 +1,5 @@
 #include "stdafx.h"
+#include "MirvWeatherStorm.h"
 
 #include "RenderSystemDX11Hooks.h"
 
@@ -2400,6 +2401,9 @@ private:
 };
 
 void BeforeUi(ID3D11DeviceContext * pDeviceContext) {
+    g_bInOwnDraw = true;
+    MirvWeatherStorm_Render(pDeviceContext);
+    g_bInOwnDraw = false;
     if (g_ReShadeAdvancedfx.IsConnected() && g_bEnableReShade) {
         float zNear = 0.0f;
         float zFar = 0.0f;

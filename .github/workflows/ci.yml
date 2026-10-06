@@ -43,6 +43,21 @@ jobs:
         working-directory: "${{github.workspace}}"
         run: cmake --build --preset x64-release --target AfxHookSource2
 
+      - name: Compile storm grading shader entries
+        shell: pwsh
+        run: |
+          $content = [IO.File]::ReadAllText('AfxHookSource2/MirvWeatherRender.cpp')
+          if ($content -notmatch '(?s)const char \* shader=R"\((.*?)\)";') { throw 'Storm shader source not found' }
+          $shader = Join-Path $env:RUNNER_TEMP 'mirv-weather-storm.hlsl'
+          [IO.File]::WriteAllText($shader, $Matches[1])
+          $fxc = Get-ChildItem -LiteralPath "${env:ProgramFiles(x86)}/Windows Kits/10/bin" -Filter fxc.exe -Recurse |
+            Where-Object { $_.FullName -match '\\x64\\fxc.exe$' } | Sort-Object FullName -Descending | Select-Object -First 1
+          if (!$fxc) { throw 'Windows SDK fxc missing' }
+          & $fxc.FullName /nologo /Ges /T vs_5_0 /E VS /Fo (Join-Path $env:RUNNER_TEMP 'storm-vs.cso') $shader
+          if ($LASTEXITCODE -ne 0) { throw 'Storm VS compilation failed' }
+          & $fxc.FullName /nologo /Ges /T ps_5_0 /E PS /Fo (Join-Path $env:RUNNER_TEMP 'storm-ps.cso') $shader
+          if ($LASTEXITCODE -ne 0) { throw 'Storm PS compilation failed' }
+
       - name: CMake - Install Source2
         working-directory: "${{github.workspace}}"
         run: |
@@ -218,7 +233,7 @@ jobs:
           fi
 
   publish_weather_contact:
-    name: Publish seven-map weather test package
+    name: Publish seven-map storm test package
     if: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.head.ref == 'feat/dust2-command-weather' }}
     needs: build
     runs-on: windows-2022
@@ -240,8 +255,8 @@ jobs:
           if (!(Test-Path -LiteralPath $binary) -or !(Test-Path -LiteralPath $source)) { throw 'Missing corresponding binary/source archives' }
           New-Item -ItemType Directory -Path stage/x64,release -Force | Out-Null
           Expand-Archive -LiteralPath $binary -DestinationPath stage/x64
-          Expand-Archive -LiteralPath delivery/seven-map-weather-resources.zip -DestinationPath stage
-          Copy-Item -LiteralPath doc/notes/seven-map-weather-user-guide.txt -Destination stage/使用说明.txt
+          Expand-Archive -LiteralPath delivery/seven-map-storm-resources.zip -DestinationPath stage
+          Copy-Item -LiteralPath doc/notes/seven-map-storm-user-guide.txt -Destination stage/使用说明.txt
           @(
             "DLL/source build commit: $env:GITHUB_SHA"
             "Build run: https://github.com/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
@@ -250,7 +265,7 @@ jobs:
             'Seven-map visual and repeated-seek acceptance: pending'
             ('DLL SHA256: ' + (Get-FileHash -LiteralPath stage/x64/AfxHookSource2.dll -Algorithm SHA256).Hash)
           ) | Set-Content -LiteralPath stage/BUILD-INFO.txt -Encoding utf8
-          Compress-Archive -Path stage/* -DestinationPath "release/Seven-map-weather-$shortSha-test.zip"
+          Compress-Archive -Path stage/* -DestinationPath "release/Seven-map-storm-$shortSha-test.zip"
           Copy-Item -LiteralPath $source -Destination release
       - name: Publish matching test DLL and source
         shell: pwsh
@@ -258,9 +273,9 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $shortSha = $env:GITHUB_SHA.Substring(0, 12)
-          $tag = "seven-map-weather-$shortSha"
+          $tag = "seven-map-storm-$shortSha"
           @(
-            'Command-driven rain for Dust2, Mirage, Cache, Inferno, Ancient, Nuke and Anubis. Use the refined Cache profile, map-specific wet materials, native rain contact/environment and postprocessing; preserve owned resources across restore/seek. Additional static puddle meshes from reference map packages are outside this DLL controller. Sky remains under mirv_sky.'
+            'Extend seven-map weather with guarded native sun/exposure, before-UI grading, native lightning and owned rain/thunder audio. Lightning uses demo time and the final kept killfeed result. Preserve the user-selected night-rain sky and original seven-map resource profiles. Additional static puddle meshes and baked-lighting rebuilds remain outside this controller.'
             ''
             'Use a complete official HLAE 2.192.6 installation. Download the Seven-map-weather test ZIP for the replacement DLL, separate weather data and Chinese instructions. It does not replace game maps or require a separate launcher.'
             ''
@@ -273,6 +288,6 @@ jobs:
           if ($LASTEXITCODE -eq 0) {
             gh release upload $tag @assets --repo $env:GITHUB_REPOSITORY --clobber
           } else {
-            gh release create $tag @assets --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title "Seven-map command weather test - $shortSha" --notes-file notes.txt --prerelease --latest=false
+            gh release create $tag @assets --repo $env:GITHUB_REPOSITORY --target $env:GITHUB_SHA --title "Seven-map storm test - $shortSha" --notes-file notes.txt --prerelease --latest=false
           }
           if ($LASTEXITCODE -ne 0) { throw 'Release publication failed' }
