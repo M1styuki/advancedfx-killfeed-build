@@ -58,6 +58,8 @@ bool groundLoadAttempted = false, postLoadAttempted = false;
 std::atomic<bool> groundActive { false };
 std::shared_mutex materialMutex;
 std::unordered_map<std::string, CMaterial2 *> wetMaterials;
+std::vector<CMaterial2 **> retainedWetBindings;
+bool resourcePinLayoutReady = false;
 std::vector<Vec3> positions;
 struct MaterialEntry { std::string original, wet; };
 std::vector<MaterialEntry> materialEntries;
@@ -260,9 +262,24 @@ bool ReadConfig() {
 void LoadMaterials() {
     if(groundReady || groundLoadAttempted || !g_pCResourceSystem) return;
     groundLoadAttempted = true;
+    if(!resourcePinLayoutReady) {
+        advancedfx::Warning("[mirv_weather] Resource reference layout unavailable; ground left unchanged.\n");
+        return;
+    }
     std::unordered_map<std::string, CMaterial2 *> loaded;
+    std::vector<CMaterial2 **> retained;
     for(const auto & e : materialEntries) {
-        auto ** material = g_pCResourceSystem->PreCache(e.wet.c_str());
+        g_pCResourceSystem->PreCache(e.wet.c_str());
+        auto ** material = FindRenderMaterial(e.wet.c_str());
+        if(material) {
+            InterlockedIncrement(reinterpret_cast<LONG *>(reinterpret_cast<unsigned char *>(material) + 0x20));
+            retained.push_back(material);
+        }
+        if(!material || !*material || !MaterialRenderCallbacksReady(*material)) {
+            advancedfx::Warning("[mirv_weather] Wet material has no callable render interface: %s; ground left unchanged.\n", e.wet.c_str());
+            for(auto ** binding : retained) InterlockedDecrement(reinterpret_cast<LONG *>(reinterpret_cast<unsigned char *>(binding) + 0x20));
+            return;
+        }
         const char * name = material && *material ? (*material)->GetName() : nullptr;
         const std::string resolved = name ? Normalize(name) : std::string();
         // Renaming the loose compiled file does not rename its m_materialName.
@@ -270,12 +287,16 @@ void LoadMaterials() {
         // keep rejecting default/error materials and unrelated resource aliases.
         if(!name || (resolved != Normalize(e.wet) && resolved != e.original)) {
             advancedfx::Warning("[mirv_weather] Wet material could not be loaded: %s (resolved=%s).\n", e.wet.c_str(), name ? name : "<null>");
+            for(auto ** binding : retained) InterlockedDecrement(reinterpret_cast<LONG *>(reinterpret_cast<unsigned char *>(binding) + 0x20));
             return;
         }
+        // Current ResourceBinding reference count is +0x20 (verified against
+        // the native zero-reference deletion check); hold our loaded resources.
         loaded[e.original] = *material;
     }
     std::unique_lock<std::shared_mutex> lock(materialMutex);
     wetMaterials.swap(loaded);
+    retainedWetBindings.swap(retained);
     groundReady = true;
 }
 
@@ -357,6 +378,8 @@ size_t UniqueAddress(HMODULE dll, const char * pattern) {
 } // namespace
 
 void MirvWeather_Initialize(HMODULE clientDll) {
+    if(HMODULE resources = GetModuleHandleA("resourcesystem.dll"))
+        resourcePinLayoutReady = 0 != UniqueAddress(resources, "8B 43 20 85 C0 0F 84 ?? ?? ?? ?? 48 0F BE 43 1C 48 83 C5 D0 3C FF");
     // These non-networked map classes inherit a base network-class descriptor.
     // Match their actual dynamic type instead of GetClientClassName().
     mapInfoVtable = reinterpret_cast<void **>(Afx::BinUtils::FindClassVtable(clientDll, ".?AVCMapInfo@@", 0, 0));
@@ -394,6 +417,9 @@ void MirvWeather_Reset() {
     lastEntityScan = 0;
     std::unique_lock<std::shared_mutex> lock(materialMutex);
     wetMaterials.clear();
+    for(auto ** binding : retainedWetBindings)
+        InterlockedDecrement(reinterpret_cast<LONG *>(reinterpret_cast<unsigned char *>(binding) + 0x20));
+    retainedWetBindings.clear();
     groundReady = false;
     groundLoadAttempted = postLoadAttempted = false;
     postReady = false;

@@ -41,3 +41,7 @@ PolyForm Noncommercial 1.0.0 许可证、NOTICE 与 PROVENANCE。
 本版修正湿地面绘制记录截断：保留新版原生记录的完整 112 字节（此前只复制 104 字节）。
 先前关闭地面的测试仅用于定位；测试本版时请启用 mirv_weather ground 1，再执行 mirv_weather 1。
 需要观察湿地面开启时是否稳定、关闭/恢复和跳转是否正常。编译通过不等于崩溃已得到游戏验收。
+
+本次继续修正湿地面材质调用：使用材质系统的明确查找结果、持有资源引用，绘制时恢复原始记录，检查必需回调可调用。
+若出现 Wet material has no callable render interface 或 Resource reference layout unavailable，地面会保留原状态。这是明确拒绝不兼容材质，不能当作完整修复通过。
+请确认 ground=1 materials=18 后持续播放，并观察开关与跳转是否稳定。
