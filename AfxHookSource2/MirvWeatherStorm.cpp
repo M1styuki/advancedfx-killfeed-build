@@ -26,10 +26,10 @@ namespace {
 bool enabled = true, wasActive = false, audioPrecached = false;
 bool soundWarning = false, manualWarning = false, sunWarning = false;
 int trigger = 3; // demo=1, kept killfeed=2, both=3
-float period = 30, sunScale = .35f, exposure = -.35f, rainVolume = .45f, thunderVolume = .55f;
-double previousTime = -1, flashStart = -100, thunderAt = -1, lastRainVolume = -1;
+float period = 30, sunScale = .35f, exposure = -.35f, rainVolume = 1.0f, thunderVolume = .55f;
+double previousTime = -1, thunderAt = -1, lastRainVolume = -1;
 long long ambientCell = -1;
-uint64_t demoFlashes = 0, killFlashes = 0, manualFlashes = 0;
+uint64_t demoThunders = 0, killThunders = 0, manualThunders = 0;
 // Audio initialization is only latched once the owned/direct native interface
 // is actually ready; a failed init is retried at a bounded, backing-off cadence
 // instead of disabling storm audio until the process restarts.
@@ -38,7 +38,7 @@ unsigned soundInitAttempts = 0;
 ULONGLONG soundInitRetryAt = 0;
 unsigned rainAudioTries = 0, rainAudioOk = 0, thunderAudioTries = 0, thunderAudioOk = 0;
 int rainAudioStage = MirvOwnedSoundStage_None, thunderAudioStage = MirvOwnedSoundStage_None;
-// A manual diagnostic request is consumed on a later, active, unpaused weather
+// A manual compatibility test is consumed on a later, active, unpaused weather
 // frame; it is independent of the schedule and of the kill filter list.
 bool manualPending = false;
 unsigned long long manualQueuedFrame = 0;
@@ -48,7 +48,7 @@ std::atomic<bool> active {false}, hideSun {false};
 // so a muted rain/thunder instance can be read as "expected while paused".
 std::atomic<bool> demoPaused {false};
 std::mutex stateMutex;
-MirvStormGrade grade {0,1,0,0,0,0,false};
+MirvStormGrade grade {0,1,0,0,0,false};
 struct Kill { int tick, attacker, victim; };
 std::deque<Kill> pending, recent;
 MirvOwnedSound rainSound, thunderSound;
@@ -121,29 +121,14 @@ void ApplyFloat(const SOURCESDK::CS2::CBaseHandle & handle, void * object, bool 
     if(*value!=desired) { *value=desired; if(light) RefreshLight(object); }
     it->applied=desired;
 }
-// The trigger source is kept explicit so the manual diagnostic test can never
-// be counted as a demo timer event or as a retained kill.
-enum FireKind { FireKind_Demo = 0, FireKind_Kill = 1, FireKind_Manual = 2 };
-void Fire(double time, FireKind kind, unsigned count = 1) {
-    flashStart=time; thunderAt=time+(kind==FireKind_Kill?.22:1.0);
-    if(kind==FireKind_Kill) killFlashes+=count; else if(kind==FireKind_Manual) manualFlashes+=count; else demoFlashes+=count;
-    // The authored bolt is a CP0->CP1 rope strike, not a snapshot generator.
-    // A level first-person sky view must intersect part of it, so the endpoint
-    // sits only ~320 units above the camera at 1500..1800 units forward and the
-    // start ~1050 units above that. The former 1000/2700 placement put almost
-    // the whole bolt outside a horizontal view. Native depth testing keeps the
-    // strike behind buildings.
-    const double yaw=g_CurrentGameCamera.angles[1]*3.141592653589793/180;
-    const float dirX=static_cast<float>(std::cos(yaw)), dirY=static_cast<float>(std::sin(yaw));
-    const float originX=static_cast<float>(g_CurrentGameCamera.origin[0]);
-    const float originY=static_cast<float>(g_CurrentGameCamera.origin[1]);
-    const float originZ=static_cast<float>(g_CurrentGameCamera.origin[2]);
-    float end[3]={originX+dirX*1600.0f,originY+dirY*1600.0f,originZ+320.0f};
-    // Start slightly behind and to the side so the strike has a natural slant.
-    float start[3]={end[0]-dirX*180.0f+dirY*90.0f,end[1]-dirY*180.0f-dirX*90.0f,end[2]+1050.0f};
-    const bool spawned=Feature("weather_lightning") && MirvWeather_SpawnLightning(start,end);
-    if(kind==FireKind_Manual)
-        advancedfx::Message("[mirv_weather] manual lightning test fired: particle=%d.\n",spawned?1:0);
+// The trigger source is kept explicit so the manual compatibility test can
+// never be counted as a demo timer event or as a retained kill. Only the
+// delayed thunder remains: the cancelled lightning visuals must not be
+// generated again, and no particle, flash or transient light is scheduled here.
+enum ThunderKind { ThunderKind_Demo = 0, ThunderKind_Kill = 1, ThunderKind_Manual = 2 };
+void ScheduleThunder(double time, ThunderKind kind, unsigned count = 1) {
+    thunderAt=time+(kind==ThunderKind_Kill?.22:1.0);
+    if(kind==ThunderKind_Kill) killThunders+=count; else if(kind==ThunderKind_Manual) manualThunders+=count; else demoThunders+=count;
 }
 } // namespace
 
@@ -173,23 +158,16 @@ void MirvWeatherStorm_ResolveSchema() {
     exposureSchemaReady=exposureOffset==0x11ac && exposureControlOffset==0x11bd;
 }
 void MirvWeatherStorm_Reset() {
-    active.store(false); hideSun.store(false); PublishGrade({0,1,0,0,0,0,false});
+    active.store(false); hideSun.store(false); PublishGrade({0,1,0,0,0,false});
     demoPaused.store(false);
     Restore(lights,true); Restore(exposures,false);
-    // Owned transient particles cannot outlive a storm reset: destroy them
-    // synchronously and release their retained definition bindings here rather
-    // than waiting for demo-time expiry (which is frozen while paused).
-    MirvWeather_ClearLightning();
-    // The manual control probe is dropped here too, so a seek, map change,
-    // storm off/master off or shutdown can never resume a queued control pulse.
-    MirvWeather_ClearLightningProbe();
     MirvPovSoundCircle_StopOwnedSound(rainSound); MirvPovSoundCircle_StopOwnedSound(thunderSound);
     MirvWeather_ReleaseAudioData();audioPrecached=false;
     {std::lock_guard<std::mutex> lock(stateMutex); pending.clear(); recent.clear();}
     lightHandles.clear(); postHandles.clear(); lastScan=0;
-    previousTime=-1; flashStart=-100; thunderAt=-1; ambientCell=-1; wasActive=false;
+    previousTime=-1; thunderAt=-1; ambientCell=-1; wasActive=false;
     lastRainVolume=-1;
-    // A queued manual diagnostic test must not survive a seek, map change or
+    // A queued manual compatibility test must not survive a seek, map change or
     // storm reset; it is a one-shot request for the next normal frame.
     manualPending=false;
 }
@@ -209,12 +187,9 @@ void MirvWeatherStorm_VisibleKill(int attacker,int victim) {
 void MirvWeatherStorm_Frame(bool masterActive, bool fromRenderFrame) {
     if(!masterActive || !enabled) {
         if(wasActive) MirvWeatherStorm_Reset();
-        // A queued manual diagnostic test must not survive storm off, even when
-        // the storm was never active and Reset() therefore did not run.
+        // A queued manual compatibility test must not survive storm off, even
+        // when the storm was never active and Reset() therefore did not run.
         manualPending=false;
-        // The control probe is likewise dropped even if the storm was never
-        // active, so it cannot fire after the storm is enabled again.
-        MirvWeather_ClearLightningProbe();
         return;
     }
     double time=0; if(!g_MirvTime.GetCurrentDemoTime(time) || !std::isfinite(time)) return;
@@ -230,17 +205,15 @@ void MirvWeatherStorm_Frame(bool masterActive, bool fromRenderFrame) {
     // the render-thread state so grading and native exposure stay out of it.
     const bool faded=RenderSystemDX11_DeathFade_IsActive();
     if(paused) {
-        // Demo time is frozen while paused, so time-based transient expiry can
-        // never run. Destroy owned lightning synchronously and never resume a
-        // stale flash or a delayed thunder after unpause.
-        MirvWeather_ClearLightning();
+        // Demo time is frozen while paused, so a delayed thunder must never
+        // resume after unpause.
         MirvPovSoundCircle_StopOwnedSound(thunderSound);
-        thunderAt=-1; flashStart=-100;
+        thunderAt=-1;
         { std::lock_guard<std::mutex> lock(stateMutex); pending.clear(); }
     }
     const long long cell=static_cast<long long>(std::floor(time/period));
-    const bool feedback=Feature("weather_lightning") || Feature("weather_lightning_light") || Feature("weather_thunder");
-    if(!paused && ambientCell>=0 && cell!=ambientCell && (trigger&1) && feedback) Fire(time,FireKind_Demo);
+    const bool feedback=Feature("weather_thunder");
+    if(!paused && ambientCell>=0 && cell!=ambientCell && (trigger&1) && feedback) ScheduleThunder(time,ThunderKind_Demo);
     ambientCell=cell; previousTime=time;
     std::deque<Kill> kills;
     { std::lock_guard<std::mutex> lock(stateMutex); kills.swap(pending); }
@@ -249,39 +222,28 @@ void MirvWeatherStorm_Frame(bool masterActive, bool fromRenderFrame) {
         unsigned burst=0;
         for(const auto & k:kills) if(k.tick==tick || std::abs(k.tick-tick)<=128) ++burst;
         // One kept kill, or a bounded multi-kill burst inside the accepted tick
-        // window, becomes a single flash with a single delayed thunder; every
-        // accepted kill still increments the counter.
-        if(burst) Fire(time,FireKind_Kill,burst);
+        // window, becomes a single delayed thunder; every accepted kill still
+        // increments the counter.
+        if(burst) ScheduleThunder(time,ThunderKind_Kill,burst);
     }
-    // The manual diagnostic test is intentionally independent of the demo timer
-    // and of the kill filter list, but it still needs a supported demo, the
-    // storm layer enabled and an unpaused frame; it never fabricates a kill
+    // The manual compatibility test is intentionally independent of the demo
+    // timer and of the kill filter list, but it still needs a supported demo,
+    // the storm layer enabled and an unpaused frame; it never fabricates a kill
     // event. It fires only on a later normal render frame than the one that
     // queued it: command-side frames neither advance frameCount nor consume it.
     if(fromRenderFrame && manualPending && !paused && frameCount>manualQueuedFrame) {
         manualPending=false;
         if(!feedback) {
-            if(!manualWarning) {manualWarning=true;advancedfx::Warning("[mirv_weather] Manual lightning test ignored: all lightning feedback features are off.\n");}
-        } else Fire(time,FireKind_Manual);
+            if(!manualWarning) {manualWarning=true;advancedfx::Warning("[mirv_weather] Manual thunder test ignored: weather_thunder is off.\n");}
+        } else ScheduleThunder(time,ThunderKind_Manual);
     }
-    // The visible-rope control probe is a separate, manual diagnostic. It never
-    // calls Fire(), so it cannot create a flash, kill or thunder event, and it
-    // deliberately does not depend on the lightning feedback feature switches:
-    // it only confirms whether the owned native particle path can draw a line.
-    // It requires this supported, enabled, unpaused storm frame; pause and any
-    // reset drop it inside MirvWeather_LightningProbeFrame/ClearLightningProbe.
-    MirvWeather_LightningProbeFrame(fromRenderFrame,paused,time);
-    const double elapsed=time-flashStart;
-    float flash=0;
-    if(!paused && !faded && Feature("weather_lightning_light") && elapsed>=0 && elapsed<.45)
-        flash=static_cast<float>((elapsed<.08?1:(elapsed<.14?.15:(elapsed<.22?.7:0)))*std::exp(-elapsed*4));
     const bool flashed=InFlash() || faded;
     if(sunSchemaReady && updateLight && lightManagerSlot && *lightManagerSlot
-        && (Feature("weather_sun") || flash>0)) {
+        && Feature("weather_sun")) {
         for(const auto & h:lightHandles) {
             auto * e=GetEntityFromIndex(h.GetEntryIndex()); if(!e || e->GetHandle()!=h) continue;
             auto * component=*reinterpret_cast<void **>(reinterpret_cast<unsigned char *>(e)+lightComponentOffset);
-            if(component) ApplyFloat(h,component,true,(Feature("weather_sun")?sunScale:1)+flash*2.0f);
+            if(component) ApplyFloat(h,component,true,sunScale);
         }
     } else { Restore(lights,true); if(Feature("weather_sun") && (!sunSchemaReady || !updateLight || !lightManagerSlot) && !sunWarning) {sunWarning=true;advancedfx::Warning("[mirv_weather] Sun interface/schema unavailable; sun unchanged.\n");} }
     hideSun.store(Feature("weather_sun"));
@@ -294,8 +256,8 @@ void MirvWeatherStorm_Frame(bool masterActive, bool fromRenderFrame) {
     const bool grading=Feature("weather_grade");
     const bool adjustExposure=Feature("weather_exposure");
     PublishGrade({adjustExposure?(exposures.empty()?exposure:exposure*.5f):0,
-        grading?.9f:1,grading?.13f:0,grading?.025f:0,grading?.025f:0,flash*.2f,
-        !flashed&&(grading||adjustExposure||flash>0)});
+        grading?.9f:1,grading?.13f:0,grading?.025f:0,grading?.025f:0,
+        !flashed&&(grading||adjustExposure)});
     // Weather resolves and owns its own direct sound-event interface. It does
     // NOT install or require the POV radar/local-pawn/network sound hooks, so a
     // failed POV sound-circle initialization cannot erase storm audio state.
@@ -358,16 +320,17 @@ bool MirvWeatherStorm_Command(advancedfx::ICommandArgs * args) {
     if(!_stricmp(key,"storm") && (!strcmp(value,"0") || !strcmp(value,"1"))) {
         enabled=value[0]=='1';
         // Documented queue cleanup: turning the storm off discards a queued
-        // manual diagnostic test and any queued/owned control probe immediately,
-        // even if the storm was never active.
-        if(!enabled) {manualPending=false;MirvWeather_ClearLightningProbe();}
+        // manual compatibility test immediately, even if it was never active.
+        if(!enabled) manualPending=false;
         return true;
     }
+    // Audio-only compatibility control: the mode selects which accepted events
+    // schedule a delayed thunder, and `test` queues one manual thunder. No
+    // lightning particle, flash or transient light is produced any more.
     if(!_stricmp(key,"lightning")) {
         if(!_stricmp(value,"demo")) trigger=1;else if(!_stricmp(value,"kills")) trigger=2;
         else if(!_stricmp(value,"both")) trigger=3;else if(!_stricmp(value,"off")) trigger=0;
         else if(!_stricmp(value,"test")) {manualPending=true;manualQueuedFrame=frameCount;}
-        else if(!_stricmp(value,"probe")) MirvWeather_QueueLightningProbe();
         else return false;
         return true;
     }
@@ -384,10 +347,10 @@ static const char * EventStateName(int stage) {
     return MirvOwnedSoundStage_None==stage ? "ok" : MirvPovSoundCircle_OwnedSoundStageName(stage);
 }
 void MirvWeatherStorm_Status() {
-    advancedfx::Message("[mirv_weather] storm=%d active=%d paused=%d sky=preserved; sun=%zu scale=%.2f exposure=%zu EV=%.2f grade=%d; lightning mode=%d demo=%llu kills=%llu manual=%llu; rainAudio=%d thunderAudio=%d.\n",
+    advancedfx::Message("[mirv_weather] storm=%d active=%d paused=%d sky=preserved; sun=%zu scale=%.2f exposure=%zu EV=%.2f grade=%d; thunder mode=%d demo=%llu kills=%llu manual=%llu; rainAudio=%d thunderAudio=%d.\n",
         enabled,active.load(),demoPaused.load(),lights.size(),sunScale,exposures.size(),exposure,MirvWeatherStorm_Grade().active,
-        trigger,static_cast<unsigned long long>(demoFlashes),static_cast<unsigned long long>(killFlashes),
-        static_cast<unsigned long long>(manualFlashes),rainSound.system!=nullptr,thunderSound.system!=nullptr);
+        trigger,static_cast<unsigned long long>(demoThunders),static_cast<unsigned long long>(killThunders),
+        static_cast<unsigned long long>(manualThunders),rainSound.system!=nullptr,thunderSound.system!=nullptr);
     // Definitions retained (precache bindings) and registered event ids
     // (resolution + validation in the native sound-event interface) are
     // deliberately reported separately: one can exist without the other. The

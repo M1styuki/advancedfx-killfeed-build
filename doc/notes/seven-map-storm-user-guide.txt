@@ -2,7 +2,8 @@
 
 保留你已经设置的 materials/skybox/sky_rain_night_01.vmat_c；本版不会执行天空替换命令。
 支持 Dust2、Mirage、Cache、Inferno、Ancient、Nuke、Anubis。
-七图的雨区和湿地面配置与上一版相同；新增阳光/太阳光斑处理、曝光与调色、原生闪电、持续雨声与雷声。
+七图的雨区和湿地面配置与上一版相同；新增阳光/太阳光斑处理、曝光与调色、持续雨声与雷声。
+本版已按最终要求取消全部闪电画面：不生成 bolt/cloud 粒子，没有全屏闪光叠加，没有瞬时照亮，也没有手动粒子对照；资源包仍是原来的 47 个天气资源，不含 storm_bolt.vpcf_c。雷声调度、永久的阳光压暗/曝光/调色与 MSAA before-HUD 渲染保留。
 
 启动 HLAE 和 Demo 后使用：
 mirv_weather 1
@@ -11,43 +12,32 @@ mirv_deathmsg filter add attackerMatch=!xTrace block=1 lastRule=1
 mirv_weather status
 
 filter 只需添加一次。请先选中要保留的玩家再添加规则；xTrace 在添加时解析成当时玩家的 XUID。
-这条规则隐藏其他玩家的击杀；留下来显示的玩家造成击杀时触发闪电。
-隐藏的击杀、世界击杀与自杀不触发；DeathPanel 不会重复触发。
+这条规则隐藏其他玩家的击杀；留下来显示的玩家造成击杀时安排雷声。
+隐藏的击杀、世界击杀与自杀不安排雷声；DeathPanel 不会重复触发。
 其他 filter 规则存在时，最终显示结果决定触发：只按 filter 循环结束后的 block/lastRule 结果判断，不另行猜测当前摄像机人物。
-不添加任何 filter 规则时，击杀不触发闪电（即使开启了击杀提示 lifetime 或调试处理也一样）；此时只有 Demo 时间自动闪电仍然生效，与 filter 无关。
+不添加任何 filter 规则时，击杀不安排雷声（即使开启了击杀提示 lifetime 或调试处理也一样）；此时只有 Demo 时间自动雷声仍然生效，与 filter 无关。
 
-闪电触发方式：
+雷声触发方式（兼容开关，只影响雷声调度，不产生任何闪电画面）：
 mirv_weather lightning demo    只按 Demo 时间
 mirv_weather lightning kills   只按 filter 保留的击杀
 mirv_weather lightning both    两种都启用（默认）
-mirv_weather lightning off     不安排新的闪电事件
+mirv_weather lightning off     不安排新的雷声事件
 mirv_weather interval 30       自动事件间隔秒数（5～300）
-默认自动闪电每 30 秒一次；暂停、回退和跳转不会补播已跳过的事件。
-暂停时会同步清除已生成的自有闪电粒子、清空待触发队列并停掉待播雷声，恢复播放后不会补播暂停期间的闪光或雷声。
-击杀时立即产生雷电效果，雷声稍后播放；同一帧内的多杀合并为一次闪光和一次雷声，计数仍按每个保留击杀累加。
-闪电的 CP0/CP1 现在放在相机前方约 1600、终点高于相机约 320、起点再高约 1050，使普通水平第一人称视角也能看到闪电的一部分；原生深度遮挡仍会让它被建筑挡住。
+默认自动雷声每 30 秒一次；暂停、回退和跳转不会补播已跳过的事件。
+暂停时会清空待触发队列、停掉待播雷声并清除延迟计时，恢复播放后不会补播暂停期间的雷声。
+击杀时稍后播放雷声；同一帧内的多杀合并为一次雷声，计数仍按每个保留击杀累加。
 
-诊断用手动测试（仅排查用，不改变天空）：
+诊断用手动测试（仅排查用，只安排一次雷声，不改变天空）：
 mirv_weather lightning test
-这是一次性排队请求，会在下一个「已启用雷雨层、已支持 Demo、未暂停」的正常天气帧执行，产生一次完整闪电反馈（粒子+闪光+稍后雷声），与 demo/kills 计划和 filter 列表无关，并单独计入 manual 计数。
-它不会伪造击杀事件，不会绕过资源/归属检查；暂停时保持排队，跳转/换图/关闭雷雨层会丢弃该请求。
-它仍受 weather_lightning、weather_lightning_light、weather_thunder 三个开关控制；三者全关时会提示该请求被忽略。
+这是一次性排队请求，会在下一个「已启用雷雨层、已支持 Demo、未暂停」的正常天气帧执行，安排一次延迟雷声，与 demo/kills 计划和 filter 列表无关，并单独计入 manual 计数。
+它不会伪造击杀事件，不生成任何粒子；暂停时保持排队，跳转/换图/关闭雷雨层会丢弃该请求。
+它只受 weather_thunder 开关控制；该开关关闭时会提示该请求被忽略。
 手动测试执行成功不代表自动击杀触发已被验证。
-
-可见绳索对照探针（仅排查用，与上面的 test 独立）：
-mirv_weather lightning probe
-它只按名称引用已安装的原生 particles/impact_fx/impact_wallbang_light_silent.vpcf 对照特效（不复制任何游戏资源），使用与自有闪电相同的已验证粒子接口、相同的 manager/记录归属检查和 CP0->CP1，用来单独确认运行时能否把一条绳索线画出来。
-排队后 1.5 秒（Demo 时间）出现第 1 次脉冲，之后每 0.75 秒一次，共 3 次；因此可以先关闭控制台。需要处于已支持、雷雨层已启用且未暂停的 Demo，并且只在正常渲染帧触发。
-它不会生成自有闪电或原生 cloud，不会产生全屏白光、击杀事件或雷声，也不受 weather_lightning / weather_lightning_light / weather_thunder 开关和 demo/kills/filter 计划影响。
-每次脉冲的 CP0 在相机前方 450/525/600、上方 40/60/80，CP1 再高 250/275/300，全部在该对照特效原生 1000 单位绘制距离以内。资源有界：最多 3 次脉冲、最多 4 个存活对照粒子、每个最多保留 1.5 秒。
-暂停、跳转、换图、关闭雷雨层或关闭整个天气都会立即丢弃排队请求并同步销毁已生成的对照粒子及其保留的资源引用。
-status 的 lightning probe 行单独给出 queued/dropped/pending/left/fired/def/fail/created/live/stage（stage 含 queued、paused、dropped）。计数只说明提交路径已到达，不代表画面已被确认。
-若对照可见而自有闪电不可见，问题更可能在自有资源定义；若对照同样不可见，问题更可能在运行时 CP/可见性/绘制路径。
 
 亮度与音量调节：
 mirv_weather sun 0.35          原生直射阳光倍率（0～1，默认 0.35）
 mirv_weather exposure -0.35    总曝光偏移 EV（-3～1，默认 -0.35）
-mirv_weather rainsound 0.45    持续雨声音量（0～1，0 关闭）
+mirv_weather rainsound 1.0     持续雨声音量（0～1，0 关闭；默认 1.0）
 mirv_weather thunder 0.55      雷声音量（0～1，0 关闭）
 如果仍亮，可逐步尝试 exposure -0.6；如果过暗，逐步接近 0。
 曝光/调色作用于场景画面；保留天空材质不等于它的像素绕过所有后处理。
@@ -61,14 +51,14 @@ mirv_weather 0                关闭整个天气并恢复修改
 mirv_pov_debug_feature weather_sun 0|1
 mirv_pov_debug_feature weather_exposure 0|1
 mirv_pov_debug_feature weather_grade 0|1
-mirv_pov_debug_feature weather_lightning 0|1
-mirv_pov_debug_feature weather_lightning_light 0|1
 mirv_pov_debug_feature weather_rainsound 0|1
 mirv_pov_debug_feature weather_thunder 0|1
-关闭闪电粒子不关闭独立的照亮与雷声。原有雨、地面、接触、环境、后处理开关继续保留。
+原 weather_lightning、weather_lightning_light 两个开关已随闪电画面一并移除。
+雷声与雨声/曝光/调色互相独立。原有雨、地面、接触、环境、后处理开关继续保留。
 以上雷雨参数和开关也会列在 mirv_weather 自带的帮助文本里；本 DLL 不执行天空替换命令。
 
 检查 status（计数只表示提交/尝试，不等于画面或声音已被确认）：
+storm 行：storm/active/paused 显示雷雨层与 Demo 状态；sky=preserved 表示天空未被改写；sun/exposure/grade 显示当前阳光缩放、曝光与调色是否生效；thunder mode 是兼容触发模式，demo/kills/manual 是三类雷声事件的累计计数。
 grade 行：shader=1 表示调色着色器已创建；calls 是请求调色的次数，entries 是读取到候选目标的次数，draws 是真正执行的隔离绘制次数；msaa 是其中走 MSAA Resolve 的次数。
 samples/resource/view/copy 显示最近一次候选目标的采样数与格式；support=resolve/sample 显示该格式的多重采样解析与采样支持；reject 是最近一次被拒绝的原因（none 表示最近一次成功）。
 latched 表示同一不受支持目标被按签名锁定跳过的次数，rejected 是累计被拒绝次数。
@@ -77,15 +67,14 @@ grade errors 行分别给出 init/draw/texture/srv/map/resolve/support 的错误
 storm audio 行：init 表示原生接口是否已就绪；tries 是初始化尝试次数，失败会按固定且退避的有界间隔重试（几秒级、有上限），只有 owned/direct 原生接口就绪后才标记完成；owned/start/stop/system/iface 是各接口就绪状态；last 是最近一次自有音效失败阶段（init、start、stop、system、event-interface、name、guid）；rain/thunder 分别给出尝试次数、成功次数和阶段。
 天气音效自行解析并校验原生接口（直接 start helper、其事件接口全局、唯一 stop wrapper 与 owned 系统单例），不安装 POV 雷达/本地 pawn/网络音效钩子；POV 初始化失败不会清除或阻断天气音效，原生代码不匹配时会安全失败并保持未就绪。
 defs 是已保留的原生音效定义数（保留定义与已注册并校验通过的事件 ID 是两件事，会分开显示）；events 显示两个雷雨事件名当前能否解析并校验（ok 表示可以）；该解析/校验与播放实例 GUID 是否存在、是否暂停无关。
-lightning spawn / rain spawn 行：tries 是尝试次数，def 是定义加载失败次数，fail 是创建/取记录失败次数，created/live 是创建成功与当前存活数，stage 是最近一次失败阶段（none 表示最近一次成功），可用来区分缺定义、缺 manager、创建被拒等情况。
+rain spawn 行：tries 是尝试次数，def 是定义加载失败次数，fail 是创建/取记录失败次数，created/live 是创建成功与当前存活数，stage 是最近一次失败阶段（none 表示最近一次成功），可用来区分缺定义、缺 manager、创建被拒等情况；本版已无 lightning spawn 行。
 storm 行的 paused 是最后一帧的 Demo 暂停状态；暂停时 rainAudio/thunderAudio=0 属于预期，不代表音效损坏。
-计数增长不等于闪电或音效已经可见/可听；若音效或 shader 不可用，状态/控制台会提示，不用全局 stopsound 或额外播放程序做隐藏替代。
+计数增长不等于雷声或音效已经可听；若音效或 shader 不可用，状态/控制台会提示，不用全局 stopsound 或额外播放程序做隐藏替代。
 
-本版不改写游戏地图包，不加入第二套降雨，不重新烘焙地图光照/反射。
-本版使用自有的最小闪电资源 particles/mirv_weather/storm_bolt.vpcf（安装为 resources/AfxHookSource2/cs2/particles/mirv_weather/storm_bolt.vpcf_c），由 tools/generate_weather_bolt.py（完整对应源码，仅用标准库、输出确定）在构建时生成并复制进包，不检出任何编译后的不透明资源，也不复制 Valve 资源；它只按名称引用已安装的 materials/particle/bendibeam.vtex。原生细闪电/分叉绳索渲染器在已安装数据中被禁用，原生 cloud 只是暗色烟雾、不是可见闪电，因此只作为可选次级闪光保留，不再生成 thin/branch。status 的 lightning spawn 行把 bolt 与 cloud 分开计数，可区分触发/定义/创建问题。原有 47 个天气资源保持不变。
+本版不改写游戏地图包，不加入第二套降雨，不重新烘焙地图光照/反射，也不生成任何自有闪电资源；天气资源包保持原始 47 个文件。
 调色在 before-UI 标记处隔离绘制（自有延迟上下文，执行后恢复原状态），录制的 BeforeUi 画面与 ReShade 输入都会包含本版调色；HUD 仍在调色之后绘制。
 原生闪光期间以及 POV 死亡渐隐的整个过程中跳过新增调色与曝光偏移，保留满白闪光和渐隐过渡；渐隐期间只保留原有的阳光压暗，避免亮度跳变。
-七图光照、真实声音、保留/隐藏击杀对照、多杀、无 filter 规则、暂停/连续回退、满白闪光、MSAA 2x/4x/8x 及录制均需游戏内验收。
+七图光照、真实雨声/雷声、保留/隐藏击杀对照、多杀、无 filter 规则、暂停/连续回退、满白闪光、MSAA 2x/4x/8x 及录制均需游戏内验收。
 编译或状态计数成功不等于以上效果已经被实际确认。
 
 安装目录：完整 HLAE 2.192.6。成品包含 x64 DLL 与原有七图 resources。

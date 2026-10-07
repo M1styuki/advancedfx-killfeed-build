@@ -148,7 +148,6 @@ float4 PS(V v):SV_Target {
  exposed*=1-a.z*h*h;
  exposed*=float3(1-a.w,1,1+a.w);
  exposed+=b.x*pow(saturate(1-lum),3)*smoothstep(.002,.02,lum);
- exposed=lerp(exposed,float3(.92,.96,1),b.y);
  float protect=smoothstep(.96,1,white);
  return float4(lerp(exposed,src.rgb,protect),src.a);
 })";
@@ -368,7 +367,7 @@ struct Drawer {
             if(predicate){c->SetPredication(predicate,predicateValue);predicate->Release();}
             Drop(target);rtv->Release();return;
         }
-        float values[8]={g.exposure,g.saturation,g.highlight,g.cool,g.shadows,g.flash,0,0};memcpy(mapped.pData,values,sizeof(values));c->Unmap(cb,0);
+        float values[8]={g.exposure,g.saturation,g.highlight,g.cool,g.shadows,0,0,0};memcpy(mapped.pData,values,sizeof(values));c->Unmap(cb,0);
         lastReject.store(RejectReason_None);
         if(msaa) {
             c->ResolveSubresource(copy,0,target,0,singleFormat);

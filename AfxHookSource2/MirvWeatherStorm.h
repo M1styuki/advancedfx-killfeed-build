@@ -4,13 +4,13 @@
 struct ID3D11DeviceContext;
 namespace advancedfx { class ICommandArgs; }
 struct MirvStormGrade {
-    float exposure, saturation, highlight, cool, shadows, flash;
+    float exposure, saturation, highlight, cool, shadows;
     bool active;
 };
 void MirvWeatherStorm_Initialize(HMODULE client);
 void MirvWeatherStorm_ResolveSchema();
 // fromRenderFrame mirrors MirvWeather_Frame: only the normal unpaused render
-// frame may consume a queued manual diagnostic test or advance its frame stamp.
+// frame may consume a queued manual thunder test or advance its frame stamp.
 void MirvWeatherStorm_Frame(bool active, bool fromRenderFrame = true);
 void MirvWeatherStorm_Reset();
 void MirvWeatherStorm_VisibleKill(int attacker, int victim);

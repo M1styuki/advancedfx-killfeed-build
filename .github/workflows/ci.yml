@@ -246,11 +246,6 @@ jobs:
         with:
           name: AfxHookSource2-${{ github.sha }}
           path: artifacts
-      - name: Generate authored storm bolt particle
-        shell: pwsh
-        run: |
-          python tools/generate_weather_bolt.py --output generated/storm_bolt.vpcf_c --check --json
-          if ($LASTEXITCODE -ne 0) { throw 'Generated storm bolt particle failed self-verification' }
       - name: Assemble DLL with corresponding source and licensed weather data
         shell: pwsh
         run: |
@@ -261,13 +256,6 @@ jobs:
           New-Item -ItemType Directory -Path stage/x64,release -Force | Out-Null
           Expand-Archive -LiteralPath $binary -DestinationPath stage/x64
           Expand-Archive -LiteralPath delivery/seven-map-weather-resources.zip -DestinationPath stage
-          # The authored bolt is generated at build time from tools/generate_weather_bolt.py
-          # (complete corresponding source) instead of being checked in as opaque bytes.
-          $bolt = 'generated/storm_bolt.vpcf_c'
-          if (!(Test-Path -LiteralPath $bolt)) { throw 'Generated storm bolt particle missing' }
-          $boltTarget = 'stage/resources/AfxHookSource2/cs2/particles/mirv_weather/storm_bolt.vpcf_c'
-          New-Item -ItemType Directory -Force -Path (Split-Path $boltTarget) | Out-Null
-          Copy-Item -LiteralPath $bolt -Destination $boltTarget
           Copy-Item -LiteralPath doc/notes/seven-map-storm-user-guide.txt -Destination stage/使用说明.txt
           @(
             "DLL/source build commit: $env:GITHUB_SHA"
@@ -287,7 +275,7 @@ jobs:
           $shortSha = $env:GITHUB_SHA.Substring(0, 12)
           $tag = "seven-map-storm-$shortSha"
           @(
-            'Extend seven-map weather with guarded native sun/exposure, before-UI grading, native lightning and owned rain/thunder audio. Lightning uses demo time and the final kept killfeed result. Preserve the user-selected night-rain sky and original seven-map resource profiles. Additional static puddle meshes and baked-lighting rebuilds remain outside this controller.'
+            'Extend seven-map weather with guarded native sun/exposure, before-UI grading and owned rain/thunder audio. Thunder is scheduled from demo time and from the final kept killfeed result; the cancelled lightning visuals are not generated. Preserve the user-selected night-rain sky and original seven-map resource profiles. Additional static puddle meshes and baked-lighting rebuilds remain outside this controller.'
             ''
             'Use a complete official HLAE 2.192.6 installation. Download the Seven-map-storm test ZIP for the replacement DLL, separate weather data and Chinese instructions. It does not replace game maps or require a separate launcher.'
             ''
