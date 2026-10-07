@@ -49,15 +49,36 @@ using GetSoundEventName_t = const char * (__fastcall *)(void *, uint32_t);
 using GetSoundFieldCount_t = int (__fastcall *)(void *, uint32_t, uint32_t, bool *, bool);
 using GetSoundFieldValue_t = bool (__fastcall *)(void *, uint32_t, uint32_t, const void **, int, bool);
 
+// Unique native scan patterns. Each is kept as a single literal so the POV
+// sound-circle and the independent owned-weather resolution share exactly the
+// same verified scans.
+constexpr const char * kStartSoundEventPattern =
+    "48 89 5C 24 10 48 89 6C 24 18 48 89 74 24 20 57 41 56 41 57 48 83 EC 60 48 8B 05 ?? ?? ?? ?? 48 8B FA 48 8D 15";
+constexpr const char * kStopSoundWrapperPattern =
+    "48 8D 9F A0 06 00 00 39 33 74 ?? 48 8B 0D ?? ?? ?? ?? 45 33 C0 48 8B D3 E8 ?? ?? ?? ??";
+
 GetLocalPawn_t g_OrgGetLocalPawn = nullptr;
+GetLocalPawn_t g_OrgGetSoundViewPawn = nullptr;
 DoStartSoundEvent_t g_OrgDoStartSoundEvent = nullptr;
 StartSoundEvent_t g_StartSoundEvent = nullptr;
+using StopOwnedSound_t = void (__fastcall *)(void *, void *, int);
+StopOwnedSound_t g_StopOwnedSound = nullptr;
+void ** g_OwnedSoundSystemSlot = nullptr;
+// Dedicated owned-weather audio interface. It is resolved independently of the
+// POV sound-circle so a failed POV detour install can never clear weather audio
+// state, and so weather never has to install radar/local-pawn/network hooks.
+StartSoundEvent_t g_OwnedStartSoundEvent = nullptr;
+void ** g_OwnedEventInterfaceSlot = nullptr;
+bool g_OwnedAudioReady = false;
 QueueRadarSound_t g_QueueRadarSound = nullptr;
 void ** g_SoundEventInterfaceSlot = nullptr;
 void * g_SoundGateReturnAddresses[3] = {};
 uint32_t g_DistanceCurveKey = 0;
 bool g_Hooked = false;
 std::atomic_bool g_NativeProducerSeen = false;
+std::atomic<int> g_OwnedSoundStage {MirvOwnedSoundStage_None};
+std::atomic<unsigned> g_OwnedSoundAttempts {0};
+std::atomic<unsigned> g_OwnedSoundStarted {0};
 SRWLOCK g_SyntheticSoundLock = SRWLOCK_INIT;
 void * g_LastSoundOpGameSystem = nullptr;
 unsigned char g_LastSoundMessageTemplate[0x68] = {};
@@ -80,8 +101,19 @@ static_assert(offsetof(SyntheticSoundString, length) == 0x10, "sound string leng
 static_assert(offsetof(SyntheticSoundString, capacity) == 0x18, "sound string capacity offset");
 
 void * GetSoundEventInterface();
+bool IsExecutableAddress(const void * address);
+
+size_t FindUniqueOwnedAudioAddress(HMODULE module, const char * pattern) {
+    Afx::BinUtils::ImageSectionsReader sections(module);
+    auto range=sections.GetMemRange();
+    auto found=FindPatternString(range,pattern);
+    if(found.IsEmpty()) return 0;
+    if(!FindPatternString(Afx::BinUtils::MemRange(found.Start+1,range.End),pattern).IsEmpty()) return 0;
+    return found.Start;
+}
 
 bool ReadSoundEventInterface(
+    void ** slot,
     void *& outInterface,
     ResolveSoundEventId_t & outResolve,
     IsSoundEventValid_t & outIsValid,
@@ -92,8 +124,9 @@ bool ReadSoundEventInterface(
     outIsValid = nullptr;
     outGetName = nullptr;
     __try {
-        outInterface = GetSoundEventInterface();
+        outInterface = nullptr != slot ? *slot : nullptr;
         if(nullptr == outInterface) return false;
+        outInterface = reinterpret_cast<unsigned char *>(outInterface) + 8;
         void ** vtable = *reinterpret_cast<void ***>(outInterface);
         if(nullptr == vtable) return false;
         outResolve = reinterpret_cast<ResolveSoundEventId_t>(vtable[0]);
@@ -103,7 +136,9 @@ bool ReadSoundEventInterface(
         // unknown names also produce a non-zero value on this build.
         outIsValid = reinterpret_cast<IsSoundEventValid_t>(vtable[1]);
         outGetName = reinterpret_cast<GetSoundEventName_t>(vtable[2]);
-        return nullptr != outResolve && nullptr != outIsValid && nullptr != outGetName;
+        return IsExecutableAddress(reinterpret_cast<void *>(outResolve))
+            && IsExecutableAddress(reinterpret_cast<void *>(outIsValid))
+            && IsExecutableAddress(reinterpret_cast<void *>(outGetName));
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         outInterface = nullptr;
         outResolve = nullptr;
@@ -124,6 +159,32 @@ bool IsExecutableAddress(const void * address)
         || PAGE_EXECUTE_READ == protection
         || PAGE_EXECUTE_READWRITE == protection
         || PAGE_EXECUTE_WRITECOPY == protection;
+}
+
+// Range guard for a resolved address: it must be committed and inside the
+// client module image, and executable when the target is called as code.
+bool IsModuleAddress(HMODULE module, const void * address, bool executable)
+{
+    if(nullptr == module || nullptr == address) return false;
+    const auto base = reinterpret_cast<uintptr_t>(module);
+    const auto image = reinterpret_cast<const unsigned char *>(module);
+    __try {
+        const auto * dos = reinterpret_cast<const IMAGE_DOS_HEADER *>(image);
+        if(IMAGE_DOS_SIGNATURE != dos->e_magic) return false;
+        const auto * nt = reinterpret_cast<const IMAGE_NT_HEADERS *>(image + dos->e_lfanew);
+        if(IMAGE_NT_SIGNATURE != nt->Signature) return false;
+        const auto size = static_cast<uintptr_t>(nt->OptionalHeader.SizeOfImage);
+        const auto target = reinterpret_cast<uintptr_t>(address);
+        if(target < base || target >= base + size) return false;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+    if(executable) return IsExecutableAddress(address);
+    MEMORY_BASIC_INFORMATION information = {};
+    if(0 == VirtualQuery(address, &information, sizeof(information))) return false;
+    if(MEM_COMMIT != information.State || 0 != (information.Protect & PAGE_GUARD)) return false;
+    const DWORD protection = information.Protect & 0xff;
+    return PAGE_NOACCESS != protection && PAGE_EXECUTE != protection;
 }
 
 uint32_t FinalizeSoundFieldHash(uint32_t hash)
@@ -224,12 +285,8 @@ int GetNativeSoundRadius(void * soundEventInterface, uint32_t eventId)
     return 1.0f <= radius ? static_cast<int>(radius) : 0;
 }
 
-CEntityInstance * __fastcall New_GetLocalPawn()
+CEntityInstance * OverrideSoundPawn(CEntityInstance * nativePawn, void * returnAddress)
 {
-    void * previousReturnAddress = MirvPov_PushHookReturnAddress(_ReturnAddress());
-    void * returnAddress = MirvPov_GetHookReturnAddress();
-    CEntityInstance * nativePawn = g_OrgGetLocalPawn();
-    MirvPov_PopHookReturnAddress(previousReturnAddress);
     if(!MIRV_POV_FEATURE_ACTIVE("soundcircle")) return nativePawn;
 
     int gate = returnAddress == g_SoundGateReturnAddresses[0]
@@ -247,6 +304,24 @@ CEntityInstance * __fastcall New_GetLocalPawn()
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         return nativePawn;
     }
+}
+
+CEntityInstance * __fastcall New_GetLocalPawn()
+{
+    void * previous = MirvPov_PushHookReturnAddress(_ReturnAddress());
+    void * caller = MirvPov_GetHookReturnAddress();
+    CEntityInstance * pawn = g_OrgGetLocalPawn();
+    MirvPov_PopHookReturnAddress(previous);
+    return OverrideSoundPawn(pawn, caller);
+}
+
+CEntityInstance * __fastcall New_GetSoundViewPawn()
+{
+    void * previous = MirvPov_PushHookReturnAddress(_ReturnAddress());
+    void * caller = MirvPov_GetHookReturnAddress();
+    CEntityInstance * pawn = g_OrgGetSoundViewPawn();
+    MirvPov_PopHookReturnAddress(previous);
+    return OverrideSoundPawn(pawn, caller);
 }
 
 void __fastcall New_DoStartSoundEvent(void * soundOpGameSystem, void * netMessage)
@@ -329,10 +404,10 @@ void MirvPovSoundCircle_Initialize(HMODULE clientDll)
 
     size_t playerSoundProducer = getAddress(
         clientDll,
-        "8B D8 E8 ?? ?? ?? ?? 48 3B C6 0F 85 ?? ?? ?? ?? 0F 28 DE 44 88 74 24 20 44 8B C3 48 8D 0D ?? ?? ?? ?? 48 8B D6 E8 ?? ?? ?? ??");
+        "8B D8 48 85 FF 0F 84 ?? ?? ?? ?? E8 ?? ?? ?? ?? 48 3B F8 0F 85 ?? ?? ?? ?? 0F 28 DE 40 88 74 24 20 44 8B C3");
     size_t queueRadarSound = getAddress(
         clientDll,
-        "48 89 5C 24 08 48 89 74 24 10 57 48 83 EC 40 0F 29 74 24 30 41 0F B6 F9 0F 28 F2 8B F2 48 8B D9 E8 ?? ?? ?? ?? 48 3B C3 75 ??");
+        "48 85 C9 74 77 48 89 5C 24 10 48 89 74 24 18 57 48 83 EC 40 0F 29 74 24 30 41 0F B6 F9 0F 28 F2 8B F2 48 8B D9 E8 ?? ?? ?? ?? 48 3B D8");
     size_t positionUpdaterBody = getAddress(
         clientDll,
         "48 8B D9 E8 ?? ?? ?? ?? 48 85 C0 0F 84 ?? ?? 00 00 48 89 6C 24 ?? 48 8D 54 24 ?? 48 89 74 24 ?? 48 8B C8");
@@ -341,8 +416,8 @@ void MirvPovSoundCircle_Initialize(HMODULE clientDll)
         return;
     }
     uint8_t * callSites[3] = {
-        reinterpret_cast<uint8_t *>(playerSoundProducer) + 2,
-        reinterpret_cast<uint8_t *>(queueRadarSound) + 0x20,
+        reinterpret_cast<uint8_t *>(playerSoundProducer) + 0x0b,
+        reinterpret_cast<uint8_t *>(queueRadarSound) + 0x25,
         reinterpret_cast<uint8_t *>(positionUpdaterBody) + 3
     };
     if(0xe8 != callSites[0][0] || 0xe8 != callSites[1][0] || 0xe8 != callSites[2][0]) {
@@ -355,12 +430,15 @@ void MirvPovSoundCircle_Initialize(HMODULE clientDll)
         int32_t relative = *reinterpret_cast<int32_t *>(callSites[i] + 1);
         localPawnTargets[i] = callSites[i] + 5 + relative;
     }
+    // The event producer and queue now use the observer-aware view Pawn;
+    // the position updater still uses the real local Pawn. Keep both gates
+    // scoped to their verified return addresses.
     if(localPawnTargets[0] != localPawnTargets[1]
-        || localPawnTargets[0] != localPawnTargets[2]) {
+        || localPawnTargets[0] == localPawnTargets[2]) {
         MIRV_POV_DIAGNOSTIC_WARNING("[mirv_pov_sound_circle] Native local-Pawn target validation failed.\n");
         return;
     }
-    if(!IsExecutableAddress(localPawnTargets[0])) {
+    if(!IsExecutableAddress(localPawnTargets[0]) || !IsExecutableAddress(localPawnTargets[2])) {
         MIRV_POV_DIAGNOSTIC_WARNING("[mirv_pov_sound_circle] Native local-Pawn target is not executable.\n");
         return;
     }
@@ -372,18 +450,11 @@ void MirvPovSoundCircle_Initialize(HMODULE clientDll)
         return;
     }
 
-    // IDA Pro: sub_1803D91F0 (CSoundOpGameSystem direct StartSoundEvent).
-    // Keep this pattern separate from DoStartSoundEvent: the two functions
-    // share the same sound core but have different argument layouts.
-    size_t startSoundEventAnchor = getAddress(
-        clientDll,
-        "48 8B FA 48 8B F1 BA FF FF FF FF 48 8D 0D");
-    // The stable anchor is 0x18 bytes into sub_1803D91F0 on the analyzed
-    // client.dll.  The shorter pattern avoids depending on the RIP-relative
-    // convar address embedded immediately after the anchor.
-    size_t startSoundEvent = 0 < startSoundEventAnchor
-        ? startSoundEventAnchor - 0x18
-        : 0;
+    // Direct StartSoundEvent helper, distinct from the network-message handler.
+    // The owned-weather stop helper and its system singleton are resolved by
+    // MirvPovSoundCircle_InitializeOwnedAudio so this POV path cannot clear
+    // weather audio state.
+    size_t startSoundEvent = getAddress(clientDll, kStartSoundEventPattern);
     uint8_t * createSoundEventCall = reinterpret_cast<uint8_t *>(doStartSoundEvent) + 0xec;
     if(0xe8 != createSoundEventCall[0]) {
         MIRV_POV_DIAGNOSTIC_WARNING("[mirv_pov_sound_circle] Native SOS create-sound call validation failed.\n");
@@ -424,7 +495,8 @@ void MirvPovSoundCircle_Initialize(HMODULE clientDll)
         return;
     }
 
-    g_OrgGetLocalPawn = reinterpret_cast<GetLocalPawn_t>(localPawnTargets[0]);
+    g_OrgGetSoundViewPawn = reinterpret_cast<GetLocalPawn_t>(localPawnTargets[0]);
+    g_OrgGetLocalPawn = reinterpret_cast<GetLocalPawn_t>(localPawnTargets[2]);
     g_OrgDoStartSoundEvent = reinterpret_cast<DoStartSoundEvent_t>(doStartSoundEvent);
     g_StartSoundEvent = reinterpret_cast<StartSoundEvent_t>(startSoundEvent);
     g_QueueRadarSound = reinterpret_cast<QueueRadarSound_t>(queueRadarSound);
@@ -435,9 +507,11 @@ void MirvPovSoundCircle_Initialize(HMODULE clientDll)
     DetourTransactionBegin();
     DetourUpdateThread(GetCurrentThread());
     DetourAttach(&(PVOID &)g_OrgGetLocalPawn, New_GetLocalPawn);
+    DetourAttach(&(PVOID &)g_OrgGetSoundViewPawn, New_GetSoundViewPawn);
     DetourAttach(&(PVOID &)g_OrgDoStartSoundEvent, New_DoStartSoundEvent);
     if(NO_ERROR != DetourTransactionCommit()) {
         g_OrgGetLocalPawn = nullptr;
+        g_OrgGetSoundViewPawn = nullptr;
         g_OrgDoStartSoundEvent = nullptr;
         g_StartSoundEvent = nullptr;
         g_QueueRadarSound = nullptr;
@@ -453,6 +527,85 @@ void MirvPovSoundCircle_Initialize(HMODULE clientDll)
     g_Hooked = true;
 }
 
+void MirvPovSoundCircle_InitializeOwnedAudio(HMODULE clientDll)
+{
+    // Weather-owned audio is resolved here, without installing any POV hook.
+    // Failure never clears a previously verified owned interface and never
+    // touches POV state, so a missing radar/local-pawn hook cannot mute weather.
+    if(g_OwnedAudioReady || nullptr == clientDll) return;
+
+    auto fail = [](MirvOwnedSoundStage stage) { g_OwnedSoundStage.store(stage); };
+
+    // Direct StartSoundEvent helper: the unique native producer pattern already
+    // used by the POV path, resolved into the dedicated owned pointer.
+    size_t startSoundEvent = FindUniqueOwnedAudioAddress(clientDll, kStartSoundEventPattern);
+    if(0 == startSoundEvent || !IsModuleAddress(clientDll, reinterpret_cast<void *>(startSoundEvent), true)) {
+        fail(MirvOwnedSoundStage_Init);
+        return;
+    }
+    auto * start = reinterpret_cast<unsigned char *>(startSoundEvent);
+
+    // At +0x42 the helper loads the sound-event interface global; +0x45 is the
+    // RIP-relative displacement and +0x49 begins the tail that calls the
+    // event-id resolver through the interface vtable:
+    //   mov r8b,1 ; add rcx,8 ; mov rax,[rcx] ; call [rax]
+    // Validate the whole tail before deriving the slot, and fail closed if the
+    // native code changes.
+    const unsigned char expectedGlobalLoad[3] = {0x48, 0x8B, 0x0D};
+    const unsigned char expectedTail[12] = {0x41, 0xB0, 0x01, 0x48, 0x83, 0xC1, 0x08, 0x48, 0x8B, 0x01, 0xFF, 0x10};
+    if(!IsModuleAddress(clientDll, start + 0x42, true)
+        || !IsModuleAddress(clientDll, start + 0x49 + sizeof(expectedTail) - 1, true)
+        || 0 != memcmp(start + 0x42, expectedGlobalLoad, sizeof(expectedGlobalLoad))
+        || 0 != memcmp(start + 0x49, expectedTail, sizeof(expectedTail))) {
+        fail(MirvOwnedSoundStage_Start);
+        return;
+    }
+    void ** ownedEventInterfaceSlot = reinterpret_cast<void **>(start + 0x49 + *reinterpret_cast<int32_t *>(start + 0x45));
+    if(!IsModuleAddress(clientDll, ownedEventInterfaceSlot, false)) {
+        fail(MirvOwnedSoundStage_EventInterface);
+        return;
+    }
+
+    // Unique stop wrapper; the validated callee prefix resolves the direct stop
+    // helper and the system singleton slot the wrapped stop call uses.
+    size_t stopSite = FindUniqueOwnedAudioAddress(clientDll, kStopSoundWrapperPattern);
+    StopOwnedSound_t stop = nullptr;
+    void ** ownedSystemSlot = nullptr;
+    if(stopSite) {
+        auto * stopFn = reinterpret_cast<unsigned char *>(stopSite + 29 + *reinterpret_cast<int32_t *>(stopSite + 25));
+        const unsigned char expected[] = {0x40,0x53,0x48,0x83,0xec,0x20,0x83,0x3a,0x00,0x48,0x8b,0xda,0x74};
+        if(IsModuleAddress(clientDll, stopFn, true)
+            && IsModuleAddress(clientDll, stopFn+sizeof(expected)-1, true)
+            && 0 == memcmp(stopFn, expected, sizeof(expected))) {
+            void ** systemSlot = reinterpret_cast<void **>(stopSite + 18 + *reinterpret_cast<int32_t *>(stopSite + 14));
+            if(IsModuleAddress(clientDll, systemSlot, false)) {
+                stop = reinterpret_cast<StopOwnedSound_t>(stopFn);
+                ownedSystemSlot = systemSlot;
+            }
+        }
+    }
+    if(nullptr == stop) { fail(MirvOwnedSoundStage_Stop); return; }
+    if(nullptr == ownedSystemSlot) { fail(MirvOwnedSoundStage_System); return; }
+
+    // The interface must expose the resolve/validate/canonical-name slots before
+    // weather may use the owned path at all.
+    void * iface = nullptr;
+    ResolveSoundEventId_t resolve = nullptr;
+    IsSoundEventValid_t valid = nullptr;
+    GetSoundEventName_t canonical = nullptr;
+    if(!ReadSoundEventInterface(ownedEventInterfaceSlot, iface, resolve, valid, canonical)) {
+        fail(MirvOwnedSoundStage_EventInterface);
+        return;
+    }
+
+    g_OwnedStartSoundEvent = reinterpret_cast<StartSoundEvent_t>(startSoundEvent);
+    g_OwnedEventInterfaceSlot = ownedEventInterfaceSlot;
+    g_StopOwnedSound = stop;
+    g_OwnedSoundSystemSlot = ownedSystemSlot;
+    g_OwnedAudioReady = true;
+    g_OwnedSoundStage.store(MirvOwnedSoundStage_None);
+}
+
 bool MirvPovSoundCircle_IsHooked()
 {
     return g_Hooked;
@@ -461,6 +614,84 @@ bool MirvPovSoundCircle_IsHooked()
 bool MirvPovSoundCircle_IsDirectEmitterReady()
 {
     return g_Hooked && nullptr != g_StartSoundEvent;
+}
+
+const char * MirvPovSoundCircle_OwnedSoundStageName(int stage)
+{
+    switch(stage) {
+    case MirvOwnedSoundStage_None: return "none";
+    case MirvOwnedSoundStage_Init: return "init";
+    case MirvOwnedSoundStage_Start: return "start";
+    case MirvOwnedSoundStage_Stop: return "stop";
+    case MirvOwnedSoundStage_System: return "system";
+    case MirvOwnedSoundStage_EventInterface: return "event-interface";
+    case MirvOwnedSoundStage_Name: return "name";
+    case MirvOwnedSoundStage_Guid: return "guid";
+    default: return "unknown";
+    }
+}
+
+bool MirvPovSoundCircle_IsOwnedSoundReady()
+{
+    // Readiness is about the verified owned native interface, not about a
+    // definition or event name having been resolved for one particular sound,
+    // and not about the POV sound-circle hooks.
+    return g_OwnedAudioReady
+        && nullptr != g_OwnedStartSoundEvent
+        && nullptr != g_StopOwnedSound
+        && nullptr != g_OwnedSoundSystemSlot;
+}
+
+int MirvPovSoundCircle_OwnedSoundLastFailure()
+{
+    return g_OwnedSoundStage.load();
+}
+
+MirvOwnedSoundReadiness MirvPovSoundCircle_OwnedSoundReadiness()
+{
+    MirvOwnedSoundReadiness readiness {};
+    readiness.hooked = g_OwnedAudioReady;
+    readiness.startHelper = nullptr != g_OwnedStartSoundEvent;
+    readiness.stopHelper = nullptr != g_StopOwnedSound;
+    readiness.ownedSystem = nullptr != g_OwnedSoundSystemSlot;
+    if(g_OwnedAudioReady) {
+        void * soundEventInterface = nullptr;
+        ResolveSoundEventId_t resolveEventId = nullptr;
+        IsSoundEventValid_t isSoundEventValid = nullptr;
+        GetSoundEventName_t getName = nullptr;
+        readiness.eventInterface = ReadSoundEventInterface(
+            g_OwnedEventInterfaceSlot, soundEventInterface, resolveEventId, isSoundEventValid, getName);
+    }
+    readiness.lastFailureStage = g_OwnedSoundStage.load();
+    readiness.attempts = g_OwnedSoundAttempts.load();
+    readiness.started = g_OwnedSoundStarted.load();
+    return readiness;
+}
+
+int MirvPovSoundCircle_ProbeOwnedSoundEvent(const char * name)
+{
+    // Diagnostic resolution only: no sound is started and no state is changed.
+    // It separates "the definition is retained" from "this event id resolves
+    // and validates in the native sound-event interface". The registered-event
+    // stages are independent of whether one particular GUID is currently active.
+    if(!g_OwnedAudioReady) return MirvOwnedSoundStage_Init;
+    if(nullptr == name || '\0' == name[0]) return MirvOwnedSoundStage_Name;
+    void * soundEventInterface = nullptr;
+    ResolveSoundEventId_t resolveEventId = nullptr;
+    IsSoundEventValid_t isSoundEventValid = nullptr;
+    GetSoundEventName_t getName = nullptr;
+    if(!ReadSoundEventInterface(g_OwnedEventInterfaceSlot, soundEventInterface, resolveEventId, isSoundEventValid, getName))
+        return MirvOwnedSoundStage_EventInterface;
+    __try {
+        const uint32_t eventId = resolveEventId(soundEventInterface, name, true);
+        if(0 == eventId) return MirvOwnedSoundStage_Name;
+        if(!isSoundEventValid(soundEventInterface, eventId)) return MirvOwnedSoundStage_Name;
+        const char * resolvedName = getName(soundEventInterface, eventId);
+        if(nullptr == resolvedName || '\0' == resolvedName[0]) return MirvOwnedSoundStage_Name;
+        return MirvOwnedSoundStage_None;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        return MirvOwnedSoundStage_EventInterface;
+    }
 }
 
 bool MirvPovSoundCircle_EmitSoundAtEntity(const char * soundName, int sourceEntityIndex)
@@ -476,7 +707,7 @@ bool MirvPovSoundCircle_EmitSoundAtEntity(const char * soundName, int sourceEnti
     ResolveSoundEventId_t resolveEventId = nullptr;
     IsSoundEventValid_t isSoundEventValid = nullptr;
     GetSoundEventName_t getName = nullptr;
-    if(!ReadSoundEventInterface(soundEventInterface, resolveEventId, isSoundEventValid, getName)) return false;
+    if(!ReadSoundEventInterface(g_SoundEventInterfaceSlot, soundEventInterface, resolveEventId, isSoundEventValid, getName)) return false;
 
     uint32_t eventId = 0;
     __try {
@@ -585,4 +816,63 @@ bool MirvPovSoundCircle_EmitSoundGlobal(const char * soundName)
     // separate entry point makes the original-global and optional spatialized
     // fallback behaviors explicit at the radio layer.
     return MirvPovSoundCircle_EmitSoundAtEntity(soundName, -1);
+}
+
+bool MirvPovSoundCircle_StartOwnedSound(const char * name, float volume, MirvOwnedSound & sound)
+{
+    // Every failure path records the stage so a normal Release status command
+    // can tell a missing owned interface from a missing definition, an
+    // unregistered event name, or a start helper that returned no GUID.
+    g_OwnedSoundAttempts.fetch_add(1);
+    if(!g_OwnedAudioReady) { g_OwnedSoundStage.store(MirvOwnedSoundStage_Init); return false; }
+    if(!name || '\0' == name[0] || volume <= 0.0f || volume > 1.0f) {
+        g_OwnedSoundStage.store(MirvOwnedSoundStage_Name); return false;
+    }
+    if(!g_StopOwnedSound) { g_OwnedSoundStage.store(MirvOwnedSoundStage_Stop); return false; }
+    if(!g_OwnedSoundSystemSlot) { g_OwnedSoundStage.store(MirvOwnedSoundStage_System); return false; }
+    if(!g_OwnedStartSoundEvent) { g_OwnedSoundStage.store(MirvOwnedSoundStage_Start); return false; }
+    MirvPovSoundCircle_StopOwnedSound(sound);
+    void * iface = nullptr;
+    ResolveSoundEventId_t resolve = nullptr;
+    IsSoundEventValid_t valid = nullptr;
+    GetSoundEventName_t canonical = nullptr;
+    if(!ReadSoundEventInterface(g_OwnedEventInterfaceSlot, iface, resolve, valid, canonical)) {
+        g_OwnedSoundStage.store(MirvOwnedSoundStage_EventInterface); return false;
+    }
+    __try {
+        void * system = *g_OwnedSoundSystemSlot;
+        if(!system) { g_OwnedSoundStage.store(MirvOwnedSoundStage_System); return false; }
+        // The valid-name check stays: resolver hashes and unknown names must not
+        // be started, and the source entity stays -1 (global, non-spatialized).
+        uint32_t id = resolve(iface, name, true);
+        if(!id || !valid(iface, id)) { g_OwnedSoundStage.store(MirvOwnedSoundStage_Name); return false; }
+        alignas(16) unsigned char result[0x40] {};
+        g_OwnedStartSoundEvent(system, result, nullptr, id, static_cast<uint32_t>(-1), -1, static_cast<double>(volume));
+        if(!*reinterpret_cast<uint32_t *>(result)) {
+            g_OwnedSoundStage.store(MirvOwnedSoundStage_Guid); return false;
+        }
+        memcpy(sound.guid, result, sizeof(sound.guid));
+        sound.system = system;
+        g_OwnedSoundStage.store(MirvOwnedSoundStage_None);
+        g_OwnedSoundStarted.fetch_add(1);
+        return true;
+    } __except(EXCEPTION_EXECUTE_HANDLER) {
+        g_OwnedSoundStage.store(MirvOwnedSoundStage_Start); return false;
+    }
+}
+
+void MirvPovSoundCircle_StopOwnedSound(MirvOwnedSound & sound)
+{
+    const bool hasInstance = nullptr != sound.system
+        && 0 != *reinterpret_cast<uint32_t *>(sound.guid);
+    __try {
+        if(g_StopOwnedSound && g_OwnedSoundSystemSlot && sound.system
+            && *g_OwnedSoundSystemSlot == sound.system && *reinterpret_cast<uint32_t *>(sound.guid))
+            g_StopOwnedSound(sound.system, sound.guid, 0);
+    } __except(EXCEPTION_EXECUTE_HANDLER) {}
+    // An instance we can no longer stop is a real failure; keep it observable
+    // instead of silently dropping the owned playback.
+    if(hasInstance && !g_StopOwnedSound) g_OwnedSoundStage.store(MirvOwnedSoundStage_Stop);
+    memset(sound.guid, 0, sizeof(sound.guid));
+    sound.system = nullptr;
 }
