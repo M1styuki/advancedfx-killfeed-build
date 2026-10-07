@@ -581,12 +581,12 @@ void PrintStatus() {
     // a created/live count is not proof that the effect is visible. The
     // authored bolt and the optional native cloud are reported separately.
     const MirvWeatherParticleStatus particles=MirvWeather_ParticleStatus();
-    advancedfx::Message("[mirv_weather] lightning spawn: tries=%u stage=%s; bolt tries=%u def=%u fail=%u live=%u stage=%s; cloud tries=%u def=%u fail=%u live=%u stage=%s.\n",
+    advancedfx::Message("[mirv_weather] lightning spawn: tries=%u stage=%s; bolt tries=%u def=%u fail=%u created=%u live=%u stage=%s; cloud tries=%u def=%u fail=%u created=%u live=%u stage=%s.\n",
         particles.lightningTries,MirvWeather_ParticleStageName(particles.lightningStage),
         particles.lightningBolt.tries,particles.lightningBolt.definitionFails,particles.lightningBolt.createFails,
-        particles.lightningBolt.live,MirvWeather_ParticleStageName(particles.lightningBolt.stage),
+        particles.lightningBolt.created,particles.lightningBolt.live,MirvWeather_ParticleStageName(particles.lightningBolt.stage),
         particles.lightningCloud.tries,particles.lightningCloud.definitionFails,particles.lightningCloud.createFails,
-        particles.lightningCloud.live,MirvWeather_ParticleStageName(particles.lightningCloud.stage));
+        particles.lightningCloud.created,particles.lightningCloud.live,MirvWeather_ParticleStageName(particles.lightningCloud.stage));
     advancedfx::Message("[mirv_weather] rain spawn: tries=%u def=%u fail=%u created=%u live=%u stage=%s; native=%d layout=%d resources=%d manager=%d.\n",
         particles.rain.tries,particles.rain.definitionFails,particles.rain.createFails,particles.rain.created,particles.rain.live,
         MirvWeather_ParticleStageName(particles.rain.stage),
@@ -678,7 +678,7 @@ void MirvWeather_Reset() {
     materialEntries.clear();
 }
 
-void MirvWeather_Frame() {
+void MirvWeather_Frame(bool fromRenderFrame) {
     const MapProfile * profile = requested ? GetDemoProfile() : nullptr;
     if(!profile) { if(loadedProfile) MirvWeather_Reset(); return; }
     // The master preference survives map changes, all map-owned resources do not.
@@ -702,7 +702,7 @@ void MirvWeather_Frame() {
     if(MirvPovDebug_IsFeatureEnabled("weather_environment")) ApplyEnvironment(); else RestoreEnvironment();
     if(wantContact && MirvPovDebug_IsFeatureEnabled("weather_contact")) ApplyContact(); else RestoreContact();
     ClearLightning(false);
-    MirvWeatherStorm_Frame(true);
+    MirvWeatherStorm_Frame(true, fromRenderFrame);
 }
 
 bool MirvWeather_SpawnLightning(const float start[3], const float end[3]) {
@@ -859,6 +859,6 @@ CON_COMMAND(mirv_weather, "Seven-map demo rain, native rain contact/environment,
     } else if(args->ArgC() != 2 || _stricmp(args->ArgV(1), "status")) {
         advancedfx::Message("mirv_weather 0|1; mirv_weather rain|ground|postprocess|contact 0|1; mirv_weather status|reload.\nStorm options: mirv_weather storm 0|1; mirv_weather lightning demo|kills|both|off; mirv_weather lightning test (diagnostic manual event); mirv_weather interval 5..300; mirv_weather sun 0..1; mirv_weather exposure -3..1; mirv_weather rainsound 0..1; mirv_weather thunder 0..1.\nSeven-map offline demos: de_dust2, de_mirage, de_cache, de_inferno, de_ancient, de_nuke, de_anubis. Install the matching resources in HLAE. Native environment: mirv_pov_debug_feature weather_environment 0|1. Storm effects: mirv_pov_debug_feature weather_sun|weather_exposure|weather_grade|weather_lightning|weather_lightning_light|weather_rainsound|weather_thunder 0|1. Sky remains controlled by mirv_sky material.\n");
     }
-    MirvWeather_Frame();
+    MirvWeather_Frame(false);
     PrintStatus();
 }

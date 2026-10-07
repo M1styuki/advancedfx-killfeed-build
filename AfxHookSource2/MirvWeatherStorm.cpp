@@ -203,12 +203,21 @@ void MirvWeatherStorm_VisibleKill(int attacker,int victim) {
     recent.push_back(k); if(recent.size()>64) recent.pop_front();
     pending.push_back(k);
 }
-void MirvWeatherStorm_Frame(bool masterActive) {
-    if(!masterActive || !enabled) { if(wasActive) MirvWeatherStorm_Reset(); return; }
+void MirvWeatherStorm_Frame(bool masterActive, bool fromRenderFrame) {
+    if(!masterActive || !enabled) {
+        if(wasActive) MirvWeatherStorm_Reset();
+        // A queued manual diagnostic test must not survive storm off, even when
+        // the storm was never active and Reset() therefore did not run.
+        manualPending=false;
+        return;
+    }
     double time=0; if(!g_MirvTime.GetCurrentDemoTime(time) || !std::isfinite(time)) return;
     if(previousTime>=0 && (time<previousTime || time-previousTime>2)) MirvWeatherStorm_Reset();
     wasActive=true; active.store(true); Scan();
-    ++frameCount;
+    // The frame stamp and the manual-test consumption belong to the normal
+    // render frame only. A command-side frame must not advance the stamp, or the
+    // manual test queued by that very command would already look "later".
+    if(fromRenderFrame) ++frameCount;
     const bool paused=g_pEngineToClient->GetDemoFile()->IsDemoPaused();
     demoPaused.store(paused);
     // A POV death fade owns the whole transition, not only exact black. Query
@@ -241,8 +250,9 @@ void MirvWeatherStorm_Frame(bool masterActive) {
     // The manual diagnostic test is intentionally independent of the demo timer
     // and of the kill filter list, but it still needs a supported demo, the
     // storm layer enabled and an unpaused frame; it never fabricates a kill
-    // event. It fires on a later frame than the one that queued it.
-    if(manualPending && !paused && frameCount>manualQueuedFrame) {
+    // event. It fires only on a later normal render frame than the one that
+    // queued it: command-side frames neither advance frameCount nor consume it.
+    if(fromRenderFrame && manualPending && !paused && frameCount>manualQueuedFrame) {
         manualPending=false;
         if(!feedback) {
             if(!manualWarning) {manualWarning=true;advancedfx::Warning("[mirv_weather] Manual lightning test ignored: all lightning feedback features are off.\n");}
@@ -332,7 +342,13 @@ bool MirvWeatherStorm_SunActive() { return hideSun.load(); }
 bool MirvWeatherStorm_Command(advancedfx::ICommandArgs * args) {
     if(args->ArgC()!=3) return false;
     const char * key=args->ArgV(1), * value=args->ArgV(2);
-    if(!_stricmp(key,"storm") && (!strcmp(value,"0") || !strcmp(value,"1"))) {enabled=value[0]=='1';return true;}
+    if(!_stricmp(key,"storm") && (!strcmp(value,"0") || !strcmp(value,"1"))) {
+        enabled=value[0]=='1';
+        // Documented queue cleanup: turning the storm off discards a queued
+        // manual diagnostic test immediately, even if it was never active.
+        if(!enabled) manualPending=false;
+        return true;
+    }
     if(!_stricmp(key,"lightning")) {
         if(!_stricmp(value,"demo")) trigger=1;else if(!_stricmp(value,"kills")) trigger=2;
         else if(!_stricmp(value,"both")) trigger=3;else if(!_stricmp(value,"off")) trigger=0;

@@ -3,7 +3,10 @@
 class CMaterial2;
 void MirvWeather_Initialize(HMODULE clientDll);
 void MirvWeather_ResolveSchemaOffsets();
-void MirvWeather_Frame();
+// fromRenderFrame is true only for the normal FRAME_RENDER_PASS call in
+// main.cpp. Command-side calls pass false so a diagnostic request queued by the
+// command itself can never be consumed by that same command.
+void MirvWeather_Frame(bool fromRenderFrame = true);
 void MirvWeather_Reset();
 bool MirvWeather_HasGroundOverride();
 CMaterial2 * MirvWeather_Material(CMaterial2 * original);
