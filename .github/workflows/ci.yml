@@ -246,6 +246,11 @@ jobs:
         with:
           name: AfxHookSource2-${{ github.sha }}
           path: artifacts
+      - name: Generate authored storm bolt particle
+        shell: pwsh
+        run: |
+          python tools/generate_weather_bolt.py --output generated/storm_bolt.vpcf_c --check --json
+          if ($LASTEXITCODE -ne 0) { throw 'Generated storm bolt particle failed self-verification' }
       - name: Assemble DLL with corresponding source and licensed weather data
         shell: pwsh
         run: |
@@ -256,6 +261,13 @@ jobs:
           New-Item -ItemType Directory -Path stage/x64,release -Force | Out-Null
           Expand-Archive -LiteralPath $binary -DestinationPath stage/x64
           Expand-Archive -LiteralPath delivery/seven-map-weather-resources.zip -DestinationPath stage
+          # The authored bolt is generated at build time from tools/generate_weather_bolt.py
+          # (complete corresponding source) instead of being checked in as opaque bytes.
+          $bolt = 'generated/storm_bolt.vpcf_c'
+          if (!(Test-Path -LiteralPath $bolt)) { throw 'Generated storm bolt particle missing' }
+          $boltTarget = 'stage/resources/AfxHookSource2/cs2/particles/mirv_weather/storm_bolt.vpcf_c'
+          New-Item -ItemType Directory -Force -Path (Split-Path $boltTarget) | Out-Null
+          Copy-Item -LiteralPath $bolt -Destination $boltTarget
           Copy-Item -LiteralPath doc/notes/seven-map-storm-user-guide.txt -Destination stage/使用说明.txt
           @(
             "DLL/source build commit: $env:GITHUB_SHA"

@@ -20,6 +20,7 @@ Nuke        hosts=221/221   materials=0/0
 Anubis      hosts=1004/1004 materials=0/0
 Cache 使用新精细雨区；Ancient 保留原生湿地面。
 Nuke 按参考方案保留原地面，Anubis 保留原有水面；0/0 不代表资源加载失败。
+status 另含 rain spawn / lightning spawn 诊断行（尝试次数、定义加载失败、创建/取记录失败、创建成功、当前存活、失败阶段）与 storm audio 就绪信息；lightning spawn 行把自有的 bolt 与可选的原生 cloud 分开计数。这些计数只代表提交过程，不代表画面或声音已经被确认。缺失定义、缺失 manager 与创建被拒可通过 stage 区分。
 
 天空仍由 mirv_sky material 控制；天气不会覆盖你选定的天空。
 本版包含雨粒子、允许的湿地面材质、原生物体雨水接触与环境雨量、Train 环境后处理。
