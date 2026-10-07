@@ -37,7 +37,12 @@ enum MirvWeatherParticleStage {
     MirvWeatherParticleStage_Time,
     MirvWeatherParticleStage_Definition,
     MirvWeatherParticleStage_Create,
-    MirvWeatherParticleStage_Record
+    MirvWeatherParticleStage_Record,
+    // Control-probe scheduling states. They are appended so the existing stage
+    // values keep their meaning.
+    MirvWeatherParticleStage_Queued,
+    MirvWeatherParticleStage_Paused,
+    MirvWeatherParticleStage_Dropped
 };
 const char * MirvWeather_ParticleStageName(int stage);
 
@@ -59,6 +64,29 @@ struct MirvWeatherParticleStatus {
 // Render/game-thread safe snapshot of the owned particle bindings. These are
 // submission counters only: they do not prove that an effect is visible.
 MirvWeatherParticleStatus MirvWeather_ParticleStatus();
+
+// Manual visible-rope control probe (`mirv_weather lightning probe`). It is a
+// deliberately isolated diagnostic: it spawns only the installed native
+// particles/impact_fx/impact_wallbang_light_silent.vpcf control effect and is
+// counted separately from the authored bolt, the optional cloud and the
+// demo/kill/manual lightning schedule. It never creates a flash, kill or
+// thunder event and never changes the production placement or feature gates.
+//
+// Queueing is transient and manual. The queued sequence runs three pulses
+// spaced 0.75 demo seconds apart, starting 1.5 demo seconds after queueing, so
+// closing the console cannot hide the effect. A pause, seek, map change, storm
+// off or weather master off drops both the pending sequence and any owned probe
+// particle.
+struct MirvWeatherProbeStatus {
+    unsigned queued, dropped, fired, definitionFails, createFails, created, live;
+    int stage;
+    int remaining;
+    bool pending;
+};
+MirvWeatherProbeStatus MirvWeather_ProbeStatus();
+void MirvWeather_QueueLightningProbe();
+void MirvWeather_ClearLightningProbe();
+void MirvWeather_LightningProbeFrame(bool fromRenderFrame, bool paused, double time);
 
 // Number of retained .vsndevts definition bindings and whether the last attempt
 // failed. Retained definitions are separate from resolved native event ids.

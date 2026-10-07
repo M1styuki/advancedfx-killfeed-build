@@ -180,6 +180,9 @@ void MirvWeatherStorm_Reset() {
     // synchronously and release their retained definition bindings here rather
     // than waiting for demo-time expiry (which is frozen while paused).
     MirvWeather_ClearLightning();
+    // The manual control probe is dropped here too, so a seek, map change,
+    // storm off/master off or shutdown can never resume a queued control pulse.
+    MirvWeather_ClearLightningProbe();
     MirvPovSoundCircle_StopOwnedSound(rainSound); MirvPovSoundCircle_StopOwnedSound(thunderSound);
     MirvWeather_ReleaseAudioData();audioPrecached=false;
     {std::lock_guard<std::mutex> lock(stateMutex); pending.clear(); recent.clear();}
@@ -209,6 +212,9 @@ void MirvWeatherStorm_Frame(bool masterActive, bool fromRenderFrame) {
         // A queued manual diagnostic test must not survive storm off, even when
         // the storm was never active and Reset() therefore did not run.
         manualPending=false;
+        // The control probe is likewise dropped even if the storm was never
+        // active, so it cannot fire after the storm is enabled again.
+        MirvWeather_ClearLightningProbe();
         return;
     }
     double time=0; if(!g_MirvTime.GetCurrentDemoTime(time) || !std::isfinite(time)) return;
@@ -258,6 +264,13 @@ void MirvWeatherStorm_Frame(bool masterActive, bool fromRenderFrame) {
             if(!manualWarning) {manualWarning=true;advancedfx::Warning("[mirv_weather] Manual lightning test ignored: all lightning feedback features are off.\n");}
         } else Fire(time,FireKind_Manual);
     }
+    // The visible-rope control probe is a separate, manual diagnostic. It never
+    // calls Fire(), so it cannot create a flash, kill or thunder event, and it
+    // deliberately does not depend on the lightning feedback feature switches:
+    // it only confirms whether the owned native particle path can draw a line.
+    // It requires this supported, enabled, unpaused storm frame; pause and any
+    // reset drop it inside MirvWeather_LightningProbeFrame/ClearLightningProbe.
+    MirvWeather_LightningProbeFrame(fromRenderFrame,paused,time);
     const double elapsed=time-flashStart;
     float flash=0;
     if(!paused && !faded && Feature("weather_lightning_light") && elapsed>=0 && elapsed<.45)
@@ -345,14 +358,16 @@ bool MirvWeatherStorm_Command(advancedfx::ICommandArgs * args) {
     if(!_stricmp(key,"storm") && (!strcmp(value,"0") || !strcmp(value,"1"))) {
         enabled=value[0]=='1';
         // Documented queue cleanup: turning the storm off discards a queued
-        // manual diagnostic test immediately, even if it was never active.
-        if(!enabled) manualPending=false;
+        // manual diagnostic test and any queued/owned control probe immediately,
+        // even if the storm was never active.
+        if(!enabled) {manualPending=false;MirvWeather_ClearLightningProbe();}
         return true;
     }
     if(!_stricmp(key,"lightning")) {
         if(!_stricmp(value,"demo")) trigger=1;else if(!_stricmp(value,"kills")) trigger=2;
         else if(!_stricmp(value,"both")) trigger=3;else if(!_stricmp(value,"off")) trigger=0;
         else if(!_stricmp(value,"test")) {manualPending=true;manualQueuedFrame=frameCount;}
+        else if(!_stricmp(value,"probe")) MirvWeather_QueueLightningProbe();
         else return false;
         return true;
     }

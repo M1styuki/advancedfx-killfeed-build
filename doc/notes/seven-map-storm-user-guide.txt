@@ -34,6 +34,16 @@ mirv_weather lightning test
 它仍受 weather_lightning、weather_lightning_light、weather_thunder 三个开关控制；三者全关时会提示该请求被忽略。
 手动测试执行成功不代表自动击杀触发已被验证。
 
+可见绳索对照探针（仅排查用，与上面的 test 独立）：
+mirv_weather lightning probe
+它只按名称引用已安装的原生 particles/impact_fx/impact_wallbang_light_silent.vpcf 对照特效（不复制任何游戏资源），使用与自有闪电相同的已验证粒子接口、相同的 manager/记录归属检查和 CP0->CP1，用来单独确认运行时能否把一条绳索线画出来。
+排队后 1.5 秒（Demo 时间）出现第 1 次脉冲，之后每 0.75 秒一次，共 3 次；因此可以先关闭控制台。需要处于已支持、雷雨层已启用且未暂停的 Demo，并且只在正常渲染帧触发。
+它不会生成自有闪电或原生 cloud，不会产生全屏白光、击杀事件或雷声，也不受 weather_lightning / weather_lightning_light / weather_thunder 开关和 demo/kills/filter 计划影响。
+每次脉冲的 CP0 在相机前方 450/525/600、上方 40/60/80，CP1 再高 250/275/300，全部在该对照特效原生 1000 单位绘制距离以内。资源有界：最多 3 次脉冲、最多 4 个存活对照粒子、每个最多保留 1.5 秒。
+暂停、跳转、换图、关闭雷雨层或关闭整个天气都会立即丢弃排队请求并同步销毁已生成的对照粒子及其保留的资源引用。
+status 的 lightning probe 行单独给出 queued/dropped/pending/left/fired/def/fail/created/live/stage（stage 含 queued、paused、dropped）。计数只说明提交路径已到达，不代表画面已被确认。
+若对照可见而自有闪电不可见，问题更可能在自有资源定义；若对照同样不可见，问题更可能在运行时 CP/可见性/绘制路径。
+
 亮度与音量调节：
 mirv_weather sun 0.35          原生直射阳光倍率（0～1，默认 0.35）
 mirv_weather exposure -0.35    总曝光偏移 EV（-3～1，默认 -0.35）

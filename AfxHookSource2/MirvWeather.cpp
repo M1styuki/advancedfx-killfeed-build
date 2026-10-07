@@ -6,6 +6,7 @@
 #include "MirvTime.h"
 #include "Globals.h"
 #include "SceneSystem.h"
+#include "DeathMsg.h"
 #include "SchemaSystem.h"
 #include "ClientEntitySystem.h"
 #include "MirvPovCore.h"
@@ -125,6 +126,31 @@ ParticleCounters lightningRes[kLightningResources];
 ParticleCounters rainCounters;
 std::atomic<unsigned> lightningTries {0};
 std::atomic<int> lightningStage {MirvWeatherParticleStage_None};
+// Manual visible-rope control probe. It references the installed native
+// particles/impact_fx/impact_wallbang_light_silent.vpcf control effect by name
+// (behavior 12, CreateSequentialPathV2 CP0->CP1, native 1000-unit draw
+// distance) purely to confirm that a rope line can be drawn at all. It is not
+// the authored bolt and it shares no counters with it.
+const char * probeName = "particles/impact_fx/impact_wallbang_light_silent.vpcf";
+constexpr unsigned kProbePulses = 3;
+constexpr double kProbeDelay = 1.5, kProbeSpacing = 0.75, kProbeLifetime = 1.5;
+constexpr size_t kProbeMaxLive = 4;
+// Placement stays inside the control particle's native 1000-unit draw
+// distance: at most 600 units ahead and 380 units above the camera, with CP1
+// 250..300 units above CP0.
+struct ProbePulse { float forward, height, length; };
+const ProbePulse probePulseTable[kProbePulses] = {
+    { 450.0f, 40.0f, 250.0f },
+    { 525.0f, 60.0f, 275.0f },
+    { 600.0f, 80.0f, 300.0f }
+};
+struct ProbeParticle { Particle particle; void * manager; void ** binding; double end; };
+std::vector<ProbeParticle> probeParticles;
+bool probePending = false;
+double probeFireAt = -1;
+int probeRemaining = 0;
+std::atomic<unsigned> probeQueued {0}, probeDropped {0}, probeFired {0}, probeDefinitionFails {0}, probeCreateFails {0}, probeCreated {0}, probeLive {0};
+std::atomic<int> probeStage {MirvWeatherParticleStage_None};
 void * rainManager = nullptr;
 void ** rainResource = nullptr;
 struct PostBackup { SOURCESDK::CS2::CBaseHandle handle; void ** original; };
@@ -229,6 +255,90 @@ void ClearLightning(bool all) {
             it=transientParticles.erase(it);
         } else ++it;
     }
+}
+
+// Destroy every owned probe control particle and release its definition
+// binding. The manager/record identity check keeps a seek from destroying a
+// different particle that has already reused our index.
+void DestroyProbeOwned() {
+    if(probeParticles.empty()) return;
+    void * current = managerFn ? managerFn() : nullptr;
+    for(const auto & p : probeParticles) {
+        if(destroyFn && current == p.manager && FindRecord(current, p.particle.index) == p.particle.record)
+            destroyFn(current, p.particle.index, true, true);
+        ReleaseBinding(p.binding);
+    }
+    probeParticles.clear();
+    probeLive.store(0);
+}
+
+// Demo time can be frozen while paused, so probe particles expire by demo time
+// and are additionally bounded by kProbeMaxLive and destroyed on pause/reset.
+void ExpireProbeOwned(double time) {
+    if(probeParticles.empty()) return;
+    void * current = managerFn ? managerFn() : nullptr;
+    for(auto it = probeParticles.begin(); it != probeParticles.end();) {
+        if(time >= it->end || current != it->manager) {
+            if(destroyFn && current == it->manager && FindRecord(current, it->particle.index) == it->particle.record)
+                destroyFn(current, it->particle.index, true, true);
+            ReleaseBinding(it->binding);
+            const unsigned value = probeLive.load();
+            if(value) probeLive.store(value - 1);
+            it = probeParticles.erase(it);
+        } else ++it;
+    }
+}
+
+void DropProbePending(int stage) {
+    if(!probePending) return;
+    probePending = false;
+    probeRemaining = 0;
+    probeDropped.fetch_add(1);
+    probeStage.store(stage);
+}
+
+bool SpawnProbePulse(double time, unsigned pulse) {
+    // Same validated native particle interfaces as the owned bolt: manager
+    // lookup, resource precache plus retained binding, create with the same
+    // attachment argument, record identity check, then CP0/CP1 update.
+    if(!managerFn || !createFn || !updateFn || !destroyFn) { probeStage.store(MirvWeatherParticleStage_NativeInterface); return false; }
+    if(!g_pCResourceSystem) { probeStage.store(MirvWeatherParticleStage_ResourceSystem); return false; }
+    if(!resourcePinLayoutReady) { probeStage.store(MirvWeatherParticleStage_Layout); return false; }
+    void * manager = managerFn();
+    if(!manager) { probeStage.store(MirvWeatherParticleStage_Manager); return false; }
+    if(probeParticles.size() >= kProbeMaxLive) DestroyProbeOwned();
+    probeFired.fetch_add(1);
+    void ** binding = reinterpret_cast<void **>(g_pCResourceSystem->PreCache(probeName));
+    if(!binding || !*binding) {
+        probeDefinitionFails.fetch_add(1);
+        probeStage.store(MirvWeatherParticleStage_Definition);
+        return false;
+    }
+    RetainBinding(binding);
+    int index = -1;
+    createFn(manager, &index, probeName, 8, 0, 0, 0, 0);
+    void * record = FindRecord(manager, index);
+    if(index < 0 || !record) {
+        ReleaseBinding(binding);
+        probeCreateFails.fetch_add(1);
+        probeStage.store(index < 0 ? MirvWeatherParticleStage_Create : MirvWeatherParticleStage_Record);
+        return false;
+    }
+    const ProbePulse & placement = probePulseTable[pulse < kProbePulses ? pulse : kProbePulses - 1];
+    const double yaw = g_CurrentGameCamera.angles[1] * 3.141592653589793 / 180;
+    const float dirX = static_cast<float>(std::cos(yaw)), dirY = static_cast<float>(std::sin(yaw));
+    const float originX = static_cast<float>(g_CurrentGameCamera.origin[0]);
+    const float originY = static_cast<float>(g_CurrentGameCamera.origin[1]);
+    const float originZ = static_cast<float>(g_CurrentGameCamera.origin[2]);
+    Vec3 start { originX + dirX * placement.forward, originY + dirY * placement.forward, originZ + placement.height };
+    Vec3 end { start.x, start.y, start.z + placement.length };
+    updateFn(manager, index, 0, &start, 0.0f);
+    updateFn(manager, index, 1, &end, 0.0f);
+    probeParticles.push_back({{index, record}, manager, binding, time + kProbeLifetime});
+    probeCreated.fetch_add(1);
+    probeLive.fetch_add(1);
+    probeStage.store(MirvWeatherParticleStage_None);
+    return true;
 }
 
 bool ReadContact(CEntityInstance * entity, uint32_t & group, bool & enabled) {
@@ -591,6 +701,14 @@ void PrintStatus() {
         particles.rain.tries,particles.rain.definitionFails,particles.rain.createFails,particles.rain.created,particles.rain.live,
         MirvWeather_ParticleStageName(particles.rain.stage),
         destroyFn && managerFn && createFn && updateFn,resourcePinLayoutReady,g_pCResourceSystem!=nullptr,managerFn!=nullptr);
+    // Manual control-probe counters. They are deliberately separate from the
+    // authored bolt/cloud and from the demo/kill/manual event counters: the
+    // probe spawns only the native control definition and creates no flash,
+    // kill or thunder event. A created/live count still only proves submission.
+    const MirvWeatherProbeStatus probe=MirvWeather_ProbeStatus();
+    advancedfx::Message("[mirv_weather] lightning probe: queued=%u dropped=%u pending=%d left=%d fired=%u; def=%u fail=%u created=%u live=%u stage=%s; control=%s.\n",
+        probe.queued,probe.dropped,probe.pending?1:0,probe.remaining,probe.fired,
+        probe.definitionFails,probe.createFails,probe.created,probe.live,MirvWeather_ParticleStageName(probe.stage),probeName);
     MirvWeatherStorm_Status();
 }
 
@@ -680,7 +798,10 @@ void MirvWeather_Reset() {
 
 void MirvWeather_Frame(bool fromRenderFrame) {
     const MapProfile * profile = requested ? GetDemoProfile() : nullptr;
-    if(!profile) { if(loadedProfile) MirvWeather_Reset(); return; }
+    // No supported active demo means no weather layer: drop a queued control
+    // probe even when the map-owned state was never loaded (for example after
+    // the weather master switch was turned off).
+    if(!profile) { if(loadedProfile) MirvWeather_Reset(); else MirvWeather_ClearLightningProbe(); return; }
     // The master preference survives map changes, all map-owned resources do not.
     if(profile != loadedProfile) {
         MirvWeather_Reset();
@@ -785,6 +906,67 @@ void MirvWeather_ReleaseAudioData() {
 
 void MirvWeather_ClearLightning() { ClearLightning(true); }
 
+void MirvWeather_QueueLightningProbe() {
+    // Transient manual request. The three pulses start kProbeDelay demo seconds
+    // later and are spaced kProbeSpacing apart, so the console can be closed
+    // before the short control effect appears. The request is not part of the
+    // demo interval or kill schedule and creates no flash, kill or thunder.
+    double time = 0;
+    const bool haveTime = g_MirvTime.GetCurrentDemoTime(time) && std::isfinite(time);
+    probePending = true;
+    probeRemaining = static_cast<int>(kProbePulses);
+    probeFireAt = haveTime ? time + kProbeDelay : -1;
+    probeQueued.fetch_add(1);
+    probeStage.store(MirvWeatherParticleStage_Queued);
+    advancedfx::Message("[mirv_weather] Control probe queued: %u pulses, first in %.2f demo seconds, spaced %.2f s. The demo must stay running: pausing, seeking, changing map or switching the storm/weather layer off drops the request.\n",
+        kProbePulses,kProbeDelay,kProbeSpacing);
+}
+
+void MirvWeather_ClearLightningProbe() {
+    DestroyProbeOwned();
+    DropProbePending(MirvWeatherParticleStage_Dropped);
+}
+
+void MirvWeather_LightningProbeFrame(bool fromRenderFrame, bool paused, double time) {
+    if(!std::isfinite(time)) return;
+    if(paused) {
+        // Pause freezes demo time, so a delayed pulse can never expire on its
+        // own. Drop the pending sequence together with any owned probe
+        // particle instead of replaying it after unpause.
+        DropProbePending(MirvWeatherParticleStage_Paused);
+        DestroyProbeOwned();
+        return;
+    }
+    ExpireProbeOwned(time);
+    if(!probePending) return;
+    if(probeFireAt < 0) probeFireAt = time + kProbeDelay;
+    // Only the normal render frame may fire a pulse, so the command-side frame
+    // of the queuing command can never consume the delay.
+    if(!fromRenderFrame || time < probeFireAt) return;
+    while(probePending && probeRemaining > 0 && time >= probeFireAt) {
+        const unsigned pulse = kProbePulses - static_cast<unsigned>(probeRemaining);
+        SpawnProbePulse(time, pulse);
+        --probeRemaining;
+        probeFireAt += kProbeSpacing;
+        if(probeRemaining == 0) probePending = false;
+    }
+}
+
+MirvWeatherProbeStatus MirvWeather_ProbeStatus() {
+    MirvWeatherProbeStatus status {};
+    status.queued = probeQueued.load();
+    status.dropped = probeDropped.load();
+    status.fired = probeFired.load();
+    status.definitionFails = probeDefinitionFails.load();
+    status.createFails = probeCreateFails.load();
+    status.created = probeCreated.load();
+    status.live = probeLive.load();
+    status.stage = probeStage.load();
+    status.pending = probePending;
+    status.remaining = probePending ? probeRemaining : 0;
+    return status;
+}
+
 const char * MirvWeather_ParticleStageName(int stage) {
     switch(stage) {
     case MirvWeatherParticleStage_None: return "none";
@@ -799,6 +981,9 @@ const char * MirvWeather_ParticleStageName(int stage) {
     case MirvWeatherParticleStage_Definition: return "definition";
     case MirvWeatherParticleStage_Create: return "create";
     case MirvWeatherParticleStage_Record: return "record";
+    case MirvWeatherParticleStage_Queued: return "queued";
+    case MirvWeatherParticleStage_Paused: return "paused";
+    case MirvWeatherParticleStage_Dropped: return "dropped";
     default: return "unknown";
     }
 }
@@ -857,7 +1042,7 @@ CON_COMMAND(mirv_weather, "Seven-map demo rain, native rain contact/environment,
         configLoaded = loadAttempted = false;
         positions.clear(); materialEntries.clear();
     } else if(args->ArgC() != 2 || _stricmp(args->ArgV(1), "status")) {
-        advancedfx::Message("mirv_weather 0|1; mirv_weather rain|ground|postprocess|contact 0|1; mirv_weather status|reload.\nStorm options: mirv_weather storm 0|1; mirv_weather lightning demo|kills|both|off; mirv_weather lightning test (diagnostic manual event); mirv_weather interval 5..300; mirv_weather sun 0..1; mirv_weather exposure -3..1; mirv_weather rainsound 0..1; mirv_weather thunder 0..1.\nSeven-map offline demos: de_dust2, de_mirage, de_cache, de_inferno, de_ancient, de_nuke, de_anubis. Install the matching resources in HLAE. Native environment: mirv_pov_debug_feature weather_environment 0|1. Storm effects: mirv_pov_debug_feature weather_sun|weather_exposure|weather_grade|weather_lightning|weather_lightning_light|weather_rainsound|weather_thunder 0|1. Sky remains controlled by mirv_sky material.\n");
+        advancedfx::Message("mirv_weather 0|1; mirv_weather rain|ground|postprocess|contact 0|1; mirv_weather status|reload.\nStorm options: mirv_weather storm 0|1; mirv_weather lightning demo|kills|both|off; mirv_weather lightning test (diagnostic manual event); mirv_weather lightning probe (diagnostic native control-rope particle); mirv_weather interval 5..300; mirv_weather sun 0..1; mirv_weather exposure -3..1; mirv_weather rainsound 0..1; mirv_weather thunder 0..1.\nSeven-map offline demos: de_dust2, de_mirage, de_cache, de_inferno, de_ancient, de_nuke, de_anubis. Install the matching resources in HLAE. Native environment: mirv_pov_debug_feature weather_environment 0|1. Storm effects: mirv_pov_debug_feature weather_sun|weather_exposure|weather_grade|weather_lightning|weather_lightning_light|weather_rainsound|weather_thunder 0|1. Sky remains controlled by mirv_sky material.\n");
     }
     MirvWeather_Frame(false);
     PrintStatus();
