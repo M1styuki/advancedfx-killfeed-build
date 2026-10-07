@@ -149,7 +149,7 @@ bool CEntityInstance::GetInBuyZone(bool & available) {
 }
 
 int CEntityInstance::GetTeam() {
-    return *(int*)((u_char*)(this) + g_clientDllOffsets.C_BaseEntity.m_iTeamNum);
+    return *(uint8_t*)((u_char*)(this) + g_clientDllOffsets.C_BaseEntity.m_iTeamNum);
 }
 
 

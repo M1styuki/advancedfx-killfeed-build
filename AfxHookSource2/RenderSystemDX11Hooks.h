@@ -27,12 +27,16 @@ void Hook_SceneSystem(void * hModule);
 void RenderSystemDX11_SupplyProjectionMatrix(const SOURCESDK::VMatrix & projectionMatrix);
 
 void RenderSystemDX11_DeathFade_Initialize(void * clientDll);
-void RenderSystemDX11_DeathFade_Hurt();
 void RenderSystemDX11_DeathFade_Death();
-void RenderSystemDX11_DeathFade_ObserveHurtEvent();
 void RenderSystemDX11_DeathFade_ObserveDeathEvent();
 void RenderSystemDX11_DeathFade_Reset();
 void RenderSystemDX11_DeathFade_ClearForObserverChange();
 void RenderSystemDX11_DeathFade_UpdateObserverState();
 void RenderSystemDX11_DeathFade_ResetObserverState();
 void RenderSystemDX11_DeathFade_ProcessPending();
+
+// Read-only query for the render thread (and the engine thread): true while a
+// POV death fade is pending, applied or being cleared. Used to keep unrelated
+// postprocessing, such as the storm grade and native exposure, out of the whole
+// fade transition.
+bool RenderSystemDX11_DeathFade_IsActive();
