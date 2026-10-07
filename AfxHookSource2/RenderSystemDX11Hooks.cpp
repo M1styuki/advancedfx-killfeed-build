@@ -1,4 +1,5 @@
 #include "stdafx.h"
+#include "MirvWeatherStorm.h"
 
 #include "RenderSystemDX11Hooks.h"
 
@@ -43,6 +44,7 @@
 #include <DirectXMath.h>
 
 #include <cstdlib>
+#include <cstddef>
 #include <set>
 #include <map>
 #include <queue>
@@ -54,7 +56,6 @@
 #include <thread>
 #include <functional>
 #include <cstdint>
-#include <cstddef>
 
 #include <dxgi.h>
 #include <dxgi1_4.h>
@@ -119,19 +120,16 @@ CViewEffects_Get_t g_CViewEffectsGet = nullptr;
 thread_local const char * g_NativeFadeApplySource = nullptr;
 
 std::mutex g_NativeFadeTemplateMutex;
-NativeFadeTemplate g_NativeHurtFadeTemplate;
 NativeFadeTemplate g_NativeDeathFadeTemplate;
 
 std::atomic<float> g_DeathFadeDueCurtime { -1.0f };
 std::atomic<int> g_DeathFadeDueTick { -1 };
 std::atomic<uint64_t> g_DeathFadeEpoch { 0 };
 std::atomic<uint64_t> g_DeathFadeScheduledEpoch { 0 };
-std::atomic<bool> g_DeathFadeHurtPending { false };
 std::atomic<float> g_LastDeathEventCurtime { -1.0f };
 std::atomic<int> g_LastDeathEventTick { -1 };
 std::atomic<float> g_ObservedDeathBlackDelay { -1.0f };
 std::atomic<int> g_ObservedDeathBlackDelayTicks { -1 };
-std::atomic<bool> g_HurtEventAwaitingFade { false };
 std::atomic<bool> g_DeathEventAwaitingBlack { false };
 std::atomic<bool> g_DeathFadeActive { false };
 std::atomic<bool> g_DeathFadeClearPending { false };
@@ -140,24 +138,17 @@ std::atomic<uint8_t> g_DeathFadeObserverMode { 0 };
 std::atomic<uint32_t> g_DeathFadeObserverTarget { 0xFFFFFFFFu };
 int g_DeathFadeLastDemoTick = -1;
 
-constexpr uint16_t kFadeIn = 0x0001;
 constexpr uint16_t kFadeOut = 0x0002;
 constexpr uint16_t kFadeStayOut = 0x0008;
 constexpr uint16_t kFadePurge = 0x0010;
 
-constexpr uint16_t kHurtFadeDuration = 64;  // fallback only: 0.125 s * 512
 constexpr uint16_t kDeathBlackFadeDuration = 307; // 0.60 s * 512
 
 // Used only until a real game Fade message has been observed. The normal
 // path below reuses the game's own duration/hold/flags/color instead.
-constexpr uint32_t kHurtFadeColor = 0x180000FF; // RGBA bytes: FF 00 00 18
 constexpr uint32_t kDeathBlackFadeColor = 0xFF000000; // RGBA bytes: 00 00 00 FF
 
-// Keep synthetic hurt/death entries replaceable. The native path uses -1 for
-// its first insertion, but repeatedly inserting our own hurt entry with -1
-// makes several full-screen fades accumulate and produces an overly dark red
-// screen. The first call still uses -1 and records the native effect id.
-std::atomic<int> g_HurtFadeEffectId { -1 };
+// Keep the owned death entry replaceable after its first insertion with -1.
 std::atomic<int> g_DeathBlackFadeEffectId { -1 };
 
 static bool NativeFade_ReadMessage(
@@ -179,11 +170,6 @@ static bool NativeFade_ReadMessage(
     }
 }
 
-static bool NativeFade_IsRed(uint32_t rgba) {
-    const uint8_t * c = reinterpret_cast<const uint8_t *>(&rgba);
-    return 0 < c[0] && c[0] > c[1] + 32 && c[0] > c[2] + 32 && 0 < c[3];
-}
-
 static bool NativeFade_IsBlack(uint32_t rgba, uint16_t flags) {
     const uint8_t * c = reinterpret_cast<const uint8_t *>(&rgba);
     return c[0] < 8 && c[1] < 8 && c[2] < 8
@@ -201,10 +187,7 @@ static void NativeFade_ObserveGameMessage(
     // themselves.
     if (nullptr != g_NativeFadeApplySource) return;
 
-    if (NativeFade_IsRed(rgba) && g_HurtEventAwaitingFade.exchange(false, std::memory_order_acq_rel)) {
-        std::lock_guard<std::mutex> lock(g_NativeFadeTemplateMutex);
-        g_NativeHurtFadeTemplate = { duration, hold, flags, rgba, true };
-    } else if (NativeFade_IsBlack(rgba, flags)
+    if (NativeFade_IsBlack(rgba, flags)
         && g_DeathEventAwaitingBlack.exchange(false, std::memory_order_acq_rel)) {
         std::lock_guard<std::mutex> lock(g_NativeFadeTemplateMutex);
         g_NativeDeathFadeTemplate = { duration, hold, flags, rgba, true };
@@ -227,9 +210,9 @@ static void NativeFade_ObserveGameMessage(
     }
 }
 
-static NativeFadeTemplate NativeFade_GetTemplate(bool death) {
+static NativeFadeTemplate NativeFade_GetDeathTemplate() {
     std::lock_guard<std::mutex> lock(g_NativeFadeTemplateMutex);
-    return death ? g_NativeDeathFadeTemplate : g_NativeHurtFadeTemplate;
+    return g_NativeDeathFadeTemplate;
 }
 
 static __int64 __fastcall NativeFade_Intercept(
@@ -269,9 +252,9 @@ bool NativeFade_Apply(
     }
 
 
-    // CViewEffects::AddFade reads the color at payload +8, after two
-    // alignment bytes following the flags. A packed 10-byte payload shifted
-    // the red and alpha channels and produced a blue/purple hurt flash.
+    // Since CS2 build 14182, AddFade expects color at +8 (12 bytes total).
+    // This is the native intermediate structure, not a CUserMessageFade_t.
+#pragma pack(push, 1)
     struct FadePayload {
         uint16_t duration;
         uint16_t hold;
@@ -279,8 +262,9 @@ bool NativeFade_Apply(
         uint16_t padding;
         uint32_t rgba;
     } payload{ duration, hold, flags, 0, rgba };
-    static_assert(offsetof(FadePayload, rgba) == 8, "Native fade color offset changed");
-    static_assert(sizeof(FadePayload) == 12, "Native fade payload size changed");
+#pragma pack(pop)
+    static_assert(sizeof(FadePayload) == 12, "Native Fade payload size changed");
+    static_assert(offsetof(FadePayload, rgba) == 8, "Native Fade color offset changed");
 
     const char * previousFadeApplySource = g_NativeFadeApplySource;
     g_NativeFadeApplySource = source;
@@ -381,26 +365,9 @@ void RenderSystemDX11_DeathFade_Initialize(void * clientDll) {
 
 }
 
-void RenderSystemDX11_DeathFade_Hurt() {
-    if(!MirvPov_IsEnabled()) return;
-    // Coalesce all hurt events observed before the next render pass. The
-    // native game path does not build a new full-screen overlay per event.
-    g_DeathFadeHurtPending.store(true, std::memory_order_release);
-}
-
-void RenderSystemDX11_DeathFade_ObserveHurtEvent() {
-    // Learn the red template only from a fade that follows an actual hurt
-    // event. This prevents unrelated red screen effects from becoming the
-    // synthetic hurt template.
-    g_HurtEventAwaitingFade.store(true, std::memory_order_release);
-}
-
 void RenderSystemDX11_DeathFade_Death() {
     if(!MirvPov_IsEnabled() || !MirvPov_IsDeathFeedbackEnabled()) return;
     const uint64_t epoch = g_DeathFadeEpoch.fetch_add(1, std::memory_order_acq_rel) + 1;
-    // Keep the last hurt Fade queued. Native CS2 can receive player_hurt and
-    // player_death in the same simulation step; dropping hurt here removed
-    // the red-to-black transition entirely.
     const float now = g_MirvTime.curtime_get();
     int tick = -1;
     const bool hasDemoTick = g_MirvTime.GetCurrentDemoTick(tick);
@@ -455,10 +422,7 @@ static void RenderSystemDX11_DeathFade_ClearOwned(const char * source, bool forc
     g_DeathFadeDueCurtime.store(-1.0f, std::memory_order_release);
     g_DeathFadeDueTick.store(-1, std::memory_order_release);
     g_DeathFadeEpoch.fetch_add(1, std::memory_order_acq_rel);
-    g_DeathFadeHurtPending.store(false, std::memory_order_release);
-    g_HurtEventAwaitingFade.store(false, std::memory_order_release);
     g_DeathEventAwaitingBlack.store(false, std::memory_order_release);
-    g_HurtFadeEffectId.store(-1, std::memory_order_release);
     g_DeathBlackFadeEffectId.store(-1, std::memory_order_release);
     const bool wasActive = g_DeathFadeActive.load(std::memory_order_acquire);
     if(!force && !wasActive) return;
@@ -556,24 +520,6 @@ void RenderSystemDX11_DeathFade_ProcessPending() {
         return;
     }
 
-    if(g_DeathFadeHurtPending.exchange(false, std::memory_order_acq_rel)) {
-        NativeFadeTemplate hurt = NativeFade_GetTemplate(false);
-        const bool learned = hurt.valid;
-        if(!learned) hurt = { kHurtFadeDuration, 0, kFadeIn, kHurtFadeColor, true };
-        uint32_t effectId = 0;
-        if (NativeFade_Apply(
-            "hurt",
-            hurt.duration,
-            hurt.hold,
-            hurt.flags,
-            hurt.rgba,
-            g_HurtFadeEffectId.load(std::memory_order_acquire),
-            &effectId)) {
-            g_HurtFadeEffectId.store(static_cast<int>(effectId), std::memory_order_release);
-            g_DeathFadeActive.store(true, std::memory_order_release);
-        }
-    }
-
     const uint64_t scheduledEpoch = g_DeathFadeScheduledEpoch.load(std::memory_order_acquire);
     if(scheduledEpoch != g_DeathFadeEpoch.load(std::memory_order_acquire)) return;
     const float dueCurtime = g_DeathFadeDueCurtime.load(std::memory_order_acquire);
@@ -602,7 +548,7 @@ void RenderSystemDX11_DeathFade_ProcessPending() {
             || g_DeathFadeScheduledEpoch.load(std::memory_order_acquire) != scheduledEpoch) {
             return;
         }
-        NativeFadeTemplate death = NativeFade_GetTemplate(true);
+        NativeFadeTemplate death = NativeFade_GetDeathTemplate();
         if(!death.valid) death = { kDeathBlackFadeDuration, 0, kFadeOut | kFadeStayOut, kDeathBlackFadeColor, true };
         uint32_t effectId = 0;
         if (NativeFade_Apply(
@@ -631,6 +577,17 @@ void RenderSystemDX11_DeathFade_ProcessPending() {
             g_DeathFadeDueTick.store(dueTick, std::memory_order_release);
         }
     }
+}
+
+bool RenderSystemDX11_DeathFade_IsActive() {
+    // Read-only atomic state, safe from either thread. A POV death fade owns
+    // the whole transition: the request is pending from the death event until
+    // the native black fade is applied, then the applied fade stays active
+    // until it is cleared. Grading and native exposure must stay out of that
+    // entire window instead of relying on a pixel threshold.
+    return g_DeathFadeActive.load(std::memory_order_acquire)
+        || g_DeathFadeClearPending.load(std::memory_order_acquire)
+        || g_DeathFadeDueCurtime.load(std::memory_order_acquire) >= 0.0f;
 }
 
 class CAfxCapture {
@@ -1700,9 +1657,6 @@ public:
 
                     if (m_pNormalDepthTexture)
                     {
-                        UINT numViewPorts = 1;
-                        pContext->RSGetViewports(&numViewPorts, &m_NormalViewPort);
-
                         ID3D11DepthStencilView* pCurrentDepthStencilView = nullptr;
                         ID3D11DepthStencilView* pNullDepthStencilView = nullptr;
                         pContext->OMGetRenderTargets(0, nullptr, &pCurrentDepthStencilView);
@@ -1725,7 +1679,8 @@ public:
                         m_DeviceContext->OMSetRenderTargets(1, &m_pDepthTextureRtv[depthTextureType], nullptr);
                         m_DeviceContext->OMSetBlendState(m_BlendState, NULL, 0xffffffff);                        
 
-                        m_DeviceContext->RSSetViewports(1, &m_NormalViewPort);
+                        D3D11_VIEWPORT viewPort = {0.0f,0.0f,(FLOAT)m_DeviceTextureDesc.Width,(FLOAT)m_DeviceTextureDesc.Height,0.0f,1.0f};
+                        m_DeviceContext->RSSetViewports(1, &viewPort);
 
                         SOURCESDK::VMatrix projectionMatrix;
                         g_RenderThread_ProjectionMatrix.Get(projectionMatrix);
@@ -1909,7 +1864,6 @@ private:
 
     ID3D11Texture2D* m_pDepthTexture[2] = {nullptr,nullptr};
     ID3D11RenderTargetView* m_pDepthTextureRtv[2] = {nullptr,nullptr};
-    D3D11_VIEWPORT m_NormalViewPort = {};
     bool m_HasNormalDepth[2] = {false,false};
 
     ID3D11DeviceContext* m_DeviceContext = nullptr;
@@ -1990,7 +1944,22 @@ HRESULT g_Present_LastResult = S_OK;
 ID3D11Device * g_pDevice = nullptr;
 ID3D11DeviceContext * g_pOtherContext = nullptr;
 int g_iDraw = -1;
+int g_iBeforeUi = -1;
 bool g_bInOwnDraw = false;
+// Render targets already graded during the current presented frame. The
+// before-UI marker can commit more than once per frame, and grading the same
+// target twice would apply the look twice; a distinct target still needs its
+// own pass. Entries hold the reference returned by OMGetRenderTargets.
+std::vector<ID3D11RenderTargetView *> g_WeatherGradedTargets;
+
+// Scoped marker for render-thread windows where HLAE submits its own draws.
+// Designated state setters must not record or rewrite that state, so every
+// such window restores the flag even on an early return.
+struct ScopedOwnDraw {
+    bool previous;
+    ScopedOwnDraw() : previous(g_bInOwnDraw) { g_bInOwnDraw = true; }
+    ~ScopedOwnDraw() { g_bInOwnDraw = previous; }
+};
 bool g_bDetectSmoke = false;
 bool g_bDetectSmoke2 = false;
 bool g_bDetectedSmoke = false;
@@ -2267,6 +2236,8 @@ void STDMETHODCALLTYPE New_ClearDepthStencilView( ID3D11DeviceContext * This,
     g_Old_ClearDepthStencilView(This, pDepthStencilView, ClearFlags, Depth, Stencil);
 }
 
+void BeforeUi(ID3D11DeviceContext * pDeviceContext);
+
 typedef void (STDMETHODCALLTYPE * OMSetRenderTargets_t)( ID3D11DeviceContext * This,
             /* [annotation] */ 
             _In_range_( 0, D3D11_SIMULTANEOUS_RENDER_TARGET_COUNT )  UINT NumViews,
@@ -2313,6 +2284,11 @@ void STDMETHODCALLTYPE New_OMSetRenderTargets( ID3D11DeviceContext * This,
             g_bDetectedSmoke = true;
             g_pSmokeDepthStencilView = pDepthStencilView;
         }
+
+        if(g_iBeforeUi == 0) {
+            g_iBeforeUi = 1;
+            BeforeUi(This);
+        }
     }
 
     g_Old_OMSetRenderTargets(This, NumViews, ppRenderTargetViews, pDepthStencilView);
@@ -2326,7 +2302,11 @@ void STDMETHODCALLTYPE New_OMSetBlendState( ID3D11DeviceContext * This,
     /* [annotation] */ 
     _In_  UINT SampleMask) {
 
-    if(g_NoDraw.OnOMSetBlendState(This,pBlendState,BlendFactor,SampleMask))
+    // HLAE's own draws (weather grading, ReShade, campath) set their own blend
+    // state. The colour-blocker must not treat that state as the game's state
+    // to remember and restore, otherwise it replaces the real saved state with
+    // an owned one.
+    if(g_bInOwnDraw || g_NoDraw.OnOMSetBlendState(This,pBlendState,BlendFactor,SampleMask))
         g_Old_OMSetBlendState(This,pBlendState,BlendFactor,SampleMask);
 }
 
@@ -2336,7 +2316,9 @@ void STDMETHODCALLTYPE New_OMSetDepthStencilState(  ID3D11DeviceContext * This,
     /* [annotation] */ 
     _In_  UINT StencilRef) {
 
-    if(g_NoDraw.OnOMSetDepthStencilState(This,pDepthStencilState,StencilRef))
+    // Same rule as New_OMSetBlendState: an owned draw's depth state must reach
+    // D3D and must never be captured as the game's saved depth state.
+    if(g_bInOwnDraw || g_NoDraw.OnOMSetDepthStencilState(This,pDepthStencilState,StencilRef))
         g_Old_OMSetDepthStencilState(This,pDepthStencilState,StencilRef);
 }
 
@@ -2435,88 +2417,106 @@ private:
 class CAfxRenderCallbackBeforeUi : public IRenderThreadCallback
 {
 public:
-    CAfxRenderCallbackBeforeUi()
+    CAfxRenderCallbackBeforeUi(int value)
+    : m_Value(value)
     {
 
     }
 
     virtual void OnCallback(void) {
-        if (auto pDeviceContext = g_RenderCommands.RenderThread_GetContext()) {
-            
-            if (g_ReShadeAdvancedfx.IsConnected() && g_bEnableReShade) {
-                float zNear = 0.0f;
-                float zFar = 0.0f;
-                g_DepthCompositor.CaptureNormalDepth(pDeviceContext, g_pCurrentDepthStencilView,
-                    g_bReShadeCompositeSmoke,
-                    CDepthCompositor::DepthTextureType_R32F,
-                    ShaderCombo_afx_depth_ps_5_0::AFXDEPTHMODE_0,
-                    ShaderCombo_afx_depth_ps_5_0::AFXD24_0,
-                    zNear,
-                    zFar
-                );
-
-                ID3D11RenderTargetView* pRenderTargetViews[1] = {nullptr};
-                ID3D11DepthStencilView* pDepthStencilView = nullptr;
-                pDeviceContext->OMGetRenderTargets(1, &pRenderTargetViews[0], &pDepthStencilView);
-
-                ID3D11Resource* pRenderTargetViewResource = nullptr;
-                //ID3D11Resource* pDepthStencilResource = nullptr;
-                if (pRenderTargetViews[0]) pRenderTargetViews[0]->GetResource(&pRenderTargetViewResource);
-                //if (g_pCurrentDepthStencilView) g_pCurrentDepthStencilView->GetResource(&pDepthStencilResource);
-
-                if (ID3D11Resource* pResource = g_DepthCompositor.GetDepthTexture(CDepthCompositor::DepthTextureType_R32F)) {
-                    g_bInOwnDraw = true;
-                    g_ReShadeAdvancedfx.AdvancedfxRenderEffects(pRenderTargetViewResource, pResource);
-                    g_bInOwnDraw = false;
-                    pResource->Release();
-                }
-
-                //if (pDepthStencilResource) pDepthStencilResource->Release();
-                if (pRenderTargetViewResource) pRenderTargetViewResource->Release();
-
-                if (pDepthStencilView) pDepthStencilView->Release();
-                if (pRenderTargetViews[0]) pRenderTargetViews[0]->Release();
-            }
-
-            ID3D11RenderTargetView* pRenderTargetViews[1] = {nullptr};
-            pDeviceContext->OMGetRenderTargets(1, &pRenderTargetViews[0], nullptr);
-            if (pRenderTargetViews[0]) {
-                if(auto pRenderPassCommands = g_RenderCommands.RenderThread_GetCommands())
-                {
-                    if(!pRenderPassCommands->BeforeUi.Empty() || !pRenderPassCommands->BeforeUi2.Empty())
-                    {
-                        if(!pRenderPassCommands->BeforeUi.Empty()) {
-                            ID3D11Resource* pRenderTargetViewResource = nullptr;
-                            pRenderTargetViews[0]->GetResource(&pRenderTargetViewResource);
-                            if(pRenderTargetViewResource) {
-                                ID3D11Texture2D * pTexture = nullptr;
-                                if(SUCCEEDED(pRenderTargetViewResource->QueryInterface(__uuidof(ID3D11Texture2D),(void**)&pTexture))){
-                                    if(pTexture) {
-                                        pRenderPassCommands->OnBeforeUi(pTexture);               
-                                        pTexture->Release();
-                                    }
-                                }
-                                pRenderTargetViewResource->Release();
-                            }
-                        }
-                        if(!pRenderPassCommands->BeforeUi2.Empty()) {
-                            pRenderPassCommands->OnBeforeUi2(pRenderTargetViews[0]); 
-                        }
-
-                    }
-                }
-                if(g_BeforeUiRT) g_BeforeUiRT->Release();
-                g_BeforeUiRT = pRenderTargetViews[0];
-            }
-        }
-        g_bDetectSmoke = false;
-        g_bDetectSmoke2 = false;
-        g_bDetectedSmoke = false;
-        g_pSmokeDepthStencilView = nullptr;
+        g_iBeforeUi = m_Value;
         delete this;
     }
 private:
+    int m_Value;
 };
+
+void BeforeUi(ID3D11DeviceContext * pDeviceContext) {
+    // The before-UI marker can commit more than once per presented frame (for
+    // example a sniper-scope pass followed by PostProcessing). Grade each
+    // distinct render target at most once per frame so a repeated marker cannot
+    // double-apply the storm look to the same target.
+    ID3D11RenderTargetView * pGradeTarget = nullptr;
+    pDeviceContext->OMGetRenderTargets(1, &pGradeTarget, nullptr);
+    if(pGradeTarget) {
+        bool alreadyGraded = false;
+        for(auto * p : g_WeatherGradedTargets) if(p == pGradeTarget) { alreadyGraded = true; break; }
+        if(alreadyGraded) pGradeTarget->Release();
+        else {
+            g_WeatherGradedTargets.push_back(pGradeTarget); // keeps the OMGetRenderTargets reference
+            ScopedOwnDraw ownDraw;
+            MirvWeatherStorm_Render(pDeviceContext);
+        }
+    }
+    if (g_ReShadeAdvancedfx.IsConnected() && g_bEnableReShade) {
+        float zNear = 0.0f;
+        float zFar = 0.0f;
+        g_DepthCompositor.CaptureNormalDepth(pDeviceContext, g_pCurrentDepthStencilView,
+            g_bReShadeCompositeSmoke,
+            CDepthCompositor::DepthTextureType_R32F,
+            ShaderCombo_afx_depth_ps_5_0::AFXDEPTHMODE_0,
+            ShaderCombo_afx_depth_ps_5_0::AFXD24_0,
+            zNear,
+            zFar
+        );
+
+        ID3D11RenderTargetView* pRenderTargetViews[1] = {nullptr};
+        ID3D11DepthStencilView* pDepthStencilView = nullptr;
+        pDeviceContext->OMGetRenderTargets(1, &pRenderTargetViews[0], &pDepthStencilView);
+
+        ID3D11Resource* pRenderTargetViewResource = nullptr;
+        //ID3D11Resource* pDepthStencilResource = nullptr;
+        if (pRenderTargetViews[0]) pRenderTargetViews[0]->GetResource(&pRenderTargetViewResource);
+        //if (g_pCurrentDepthStencilView) g_pCurrentDepthStencilView->GetResource(&pDepthStencilResource);
+
+        if (ID3D11Resource* pResource = g_DepthCompositor.GetDepthTexture(CDepthCompositor::DepthTextureType_R32F)) {
+            ScopedOwnDraw ownDraw;
+            g_ReShadeAdvancedfx.AdvancedfxRenderEffects(pRenderTargetViewResource, pResource);
+            pResource->Release();
+        }
+
+        //if (pDepthStencilResource) pDepthStencilResource->Release();
+        if (pRenderTargetViewResource) pRenderTargetViewResource->Release();
+
+        if (pDepthStencilView) pDepthStencilView->Release();
+        if (pRenderTargetViews[0]) pRenderTargetViews[0]->Release();
+    }
+
+    ID3D11RenderTargetView* pRenderTargetViews[1] = {nullptr};
+    pDeviceContext->OMGetRenderTargets(1, &pRenderTargetViews[0], nullptr);
+    if (pRenderTargetViews[0]) {
+        if(auto pRenderPassCommands = g_RenderCommands.RenderThread_GetCommands())
+        {
+            if(!pRenderPassCommands->BeforeUi.Empty() || !pRenderPassCommands->BeforeUi2.Empty())
+            {
+                if(!pRenderPassCommands->BeforeUi.Empty()) {
+                    ID3D11Resource* pRenderTargetViewResource = nullptr;
+                    pRenderTargetViews[0]->GetResource(&pRenderTargetViewResource);
+                    if(pRenderTargetViewResource) {
+                        ID3D11Texture2D * pTexture = nullptr;
+                        if(SUCCEEDED(pRenderTargetViewResource->QueryInterface(__uuidof(ID3D11Texture2D),(void**)&pTexture))){
+                            if(pTexture) {
+                                pRenderPassCommands->OnBeforeUi(pTexture);
+                                pTexture->Release();
+                            }
+                        }
+                        pRenderTargetViewResource->Release();
+                    }
+                }
+                if(!pRenderPassCommands->BeforeUi2.Empty()) {
+                    pRenderPassCommands->OnBeforeUi2(pRenderTargetViews[0]);
+                }
+
+            }
+        }
+        if(g_BeforeUiRT) g_BeforeUiRT->Release();
+        g_BeforeUiRT = pRenderTargetViews[0];
+    }
+    g_bDetectSmoke = false;
+    g_bDetectSmoke2 = false;
+    g_bDetectedSmoke = false;
+    g_pSmokeDepthStencilView = nullptr;
+}
 
 class CAfxRenderCallbackBlockBuffers : public IRenderThreadCallback
 {
@@ -2787,7 +2787,10 @@ void After_Present() {
 
     if(g_BeforeUiRT) g_BeforeUiRT->Release();
     g_BeforeUiRT = nullptr;
-    g_iDraw = -1;    
+    g_iDraw = -1;
+    g_iBeforeUi = -1;
+    for(auto * p : g_WeatherGradedTargets) p->Release();
+    g_WeatherGradedTargets.clear();
 }
 
 HRESULT STDMETHODCALLTYPE New_Present( void * This,
@@ -3042,6 +3045,11 @@ AFXDEBUG CreateRenderContextPtr1(#%s/SetupLightsAndViewConstants):#PanoramaEngin
 AFXDEBUG CreateRenderContextPtr2(SubmitAllDisplayLists):SubmitAllDisplayLists
 */
 
+void QueueCallbackBeforeUi(void* pCRenderContextDx11_SoftwareCommandList, int value) {
+    auto fnQueueCallback = (void(__fastcall*)(void* pCRenderContextDx11_SoftwareCommandList, void* pCallback))(*(void***)pCRenderContextDx11_SoftwareCommandList)[g_SoftwareCommandList_QueueCallback_Offset];
+    fnQueueCallback(pCRenderContextDx11_SoftwareCommandList, new CAfxRenderCallbackBeforeUi(value));
+}
+
 unsigned char * __fastcall New_SceneSystem_CreateRenderContextPtr1(unsigned char * param_1, unsigned char param_2, void* pDevice, void * param_4, const char * fmt, ...) {
 
     // It would be possible to pass vararg on with asm trampoline, but it seems unused?
@@ -3110,18 +3118,6 @@ unsigned char * __fastcall New_SceneSystem_CreateRenderContextPtr1(unsigned char
             }
         }
     }  
-    else if(fmt && 0 == strcmp("#%s/SetupLightsAndViewConstants",fmt)) {
-        va_list args;
-        va_start(args, fmt);
-        const char * pszArg0 = va_arg(args, const char *);
-        if(pszArg0 && 0 == strcmp("CSGOHud",pszArg0)) {
-            if (void* pCRenderContextDx11_SoftwareCommandList = *(void**)param_1) {
-                auto fnQueueCallback = (void(__fastcall*)(void* pCRenderContextDx11_SoftwareCommandList, void* pCallback))(*(void***)pCRenderContextDx11_SoftwareCommandList)[g_SoftwareCommandList_QueueCallback_Offset];
-                fnQueueCallback(pCRenderContextDx11_SoftwareCommandList, new CAfxRenderCallbackBeforeUi());
-            }
-        }
-    }
-
 
     return result;
 }
