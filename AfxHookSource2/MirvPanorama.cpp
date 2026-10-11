@@ -18,10 +18,19 @@
 
 static void* g_CStylePropertyOpacity_vtable = 0;
 static void* g_CStylePropertyVisible_vtable = 0;
+static void* g_CStylePropertyPosition_vtable = 0;
 static void** g_PanoramaUIEngine = nullptr;
 
 typedef void(__fastcall *g_CPanelStyleSetStyleProperty_t)(void* This, void* property, bool transition);
 static g_CPanelStyleSetStyleProperty_t g_CPanelStyleSetStyleProperty = nullptr;
+static HMODULE g_StylePropertiesModule = nullptr;
+static bool g_StylePropertiesReady = false;
+
+static bool EnsureStyleProperties() {
+	// Panorama hooks may have been installed while POV was disabled. Discover
+	// the optional style API when its first real consumer needs it instead.
+	return MirvPanorama_InitStyleProperties(GetModuleHandleW(L"panorama.dll"));
+}
 
 struct StylePropertySymbolMap {
 	typedef uint8_t* (__fastcall *Resolve_t)(uint8_t* out, const char* stylePropertyName);
@@ -67,7 +76,7 @@ struct StylePropertyOpacity {
 	void* vtable;
 	uint8_t id;
 	bool disallowTransition = false;
-	u_char pad[0x6];
+	u_char pad[0x6]{};
 	float value;
 
 	StylePropertyOpacity() {}
@@ -80,7 +89,7 @@ struct StylePropertyVisible {
 	void* vtable;
 	uint8_t id;
 	bool disallowTransition = false;
-	u_char pad[0x6];
+	u_char pad[0x6]{};
 	uint16_t value;
 
 	StylePropertyVisible() {}
@@ -88,6 +97,26 @@ struct StylePropertyVisible {
 	StylePropertyVisible(void* vt, uint8_t i, bool v)
 		: vtable(vt), id(i), value(v ? 0x0101 : 0x0001) {}
 };
+
+struct StylePropertyPosition {
+	void* vtable;
+	uint8_t id;
+	bool disallowTransition = false;
+	u_char pad[0x6]{};
+	float x = 0.0f;
+	uint32_t xUnit = 0;
+	float y = 0.0f;
+	uint32_t yUnit = 0;
+	float z = 0.0f;
+	uint32_t zUnit = 0;
+
+	StylePropertyPosition() {}
+
+	StylePropertyPosition(void* vt, uint8_t i, float v)
+		: vtable(vt), id(i), x(v), xUnit(1) {}
+};
+
+static_assert(sizeof(StylePropertyPosition) == 40, "Unexpected Panorama position-property layout.");
 
 static bool makeOpacityProperty(StylePropertyOpacity* out, float value) {
 	auto id = g_PanoramaStylePropertySymbols.findSymbol("opacity");
@@ -107,9 +136,19 @@ static bool makeVisibleProperty(StylePropertyVisible* out, bool value) {
 	return true;
 }
 
+static bool makeXProperty(StylePropertyPosition* out, float value) {
+	auto id = g_PanoramaStylePropertySymbols.findSymbol("x");
+	if(g_CStylePropertyPosition_vtable == nullptr || id == 0xFF) return false;
+
+	*out = StylePropertyPosition { g_CStylePropertyPosition_vtable, id, value };
+
+	return true;
+}
+
 struct CUIPanel {
 	bool setOpacity(float value) {
-		auto style = (u_char*)(this + CS2::PanoramaUIPanel::panelStyle);
+		if(!EnsureStyleProperties()) return false;
+		auto style = reinterpret_cast<u_char*>(this) + CS2::PanoramaUIPanel::panelStyle;
 
 		StylePropertyOpacity styleProp;
 		if(!makeOpacityProperty(&styleProp, value)) return false;
@@ -120,10 +159,23 @@ struct CUIPanel {
 	}
 
 	bool setVisible(bool value) {
-		auto style = (u_char*)(this + CS2::PanoramaUIPanel::panelStyle);
+		if(!EnsureStyleProperties()) return false;
+		auto style = reinterpret_cast<u_char*>(this) + CS2::PanoramaUIPanel::panelStyle;
 
 		StylePropertyVisible styleProp;
 		if(!makeVisibleProperty(&styleProp, value)) return false;
+
+		g_CPanelStyleSetStyleProperty(style, &styleProp, true);
+
+		return true;
+	}
+
+	bool setX(float value) {
+		if(!EnsureStyleProperties()) return false;
+		auto style = reinterpret_cast<u_char*>(this) + CS2::PanoramaUIPanel::panelStyle;
+
+		StylePropertyPosition styleProp;
+		if(!makeXProperty(&styleProp, value)) return false;
 
 		g_CPanelStyleSetStyleProperty(style, &styleProp, true);
 
@@ -229,11 +281,29 @@ bool Panorama_SetPanelVisible(void* panel, bool value) {
 	return ((CUIPanel*)panel)->setVisible(value);
 }
 
+bool Panorama_SetPanelX(void* panel, float value) {
+	if(!panel) return false;
+	return ((CUIPanel*)panel)->setX(value);
+}
+
 bool MirvPanorama_InitStyleProperties(HMODULE panoramaDll) {
+	// Do not latch a missing module: a later call after load must retry. Cache
+	// both success and failure for a loaded module to avoid per-frame scans or
+	// repeated warnings on unsupported builds. Never use partially found APIs.
+	if(!panoramaDll) return false;
+	if(g_StylePropertiesModule == panoramaDll) return g_StylePropertiesReady;
+	g_StylePropertiesModule = panoramaDll;
+	g_StylePropertiesReady = false;
+	g_CStylePropertyOpacity_vtable = nullptr;
+	g_CStylePropertyVisible_vtable = nullptr;
+	g_CStylePropertyPosition_vtable = nullptr;
+	g_CPanelStyleSetStyleProperty = nullptr;
+	g_PanoramaStylePropertySymbols.resolve = nullptr;
+	g_PanoramaStylePropertySymbols.symbols = nullptr;
 	{
 		g_CStylePropertyOpacity_vtable = (void**)Afx::BinUtils::FindClassVtable(panoramaDll, ".?AVCStylePropertyOpacity@panorama@@", 0, 0);
 		if(nullptr == g_CStylePropertyOpacity_vtable) {
-			ErrorBox(MkErrStr(__FILE__, __LINE__));
+			advancedfx::Warning("AFXWARNING: Panorama opacity style unavailable; style writes disabled.\n");
 			return false;
 		}
 	}
@@ -241,8 +311,15 @@ bool MirvPanorama_InitStyleProperties(HMODULE panoramaDll) {
 	{
 		g_CStylePropertyVisible_vtable = (void**)Afx::BinUtils::FindClassVtable(panoramaDll, ".?AVCStylePropertyVisible@panorama@@", 0, 0);
 		if(nullptr == g_CStylePropertyVisible_vtable) {
-			ErrorBox(MkErrStr(__FILE__, __LINE__));
+			advancedfx::Warning("AFXWARNING: Panorama visibility style unavailable; style writes disabled.\n");
 			return false;
+		}
+	}
+
+	{
+		g_CStylePropertyPosition_vtable = (void**)Afx::BinUtils::FindClassVtable(panoramaDll, ".?AVCStylePropertyPosition@panorama@@", 0, 0);
+		if(nullptr == g_CStylePropertyPosition_vtable) {
+			advancedfx::Warning("AFXWARNING: Panorama position style is unavailable; POV buy-menu layout correction is disabled.\n");
 		}
 	}
 
@@ -255,7 +332,7 @@ bool MirvPanorama_InitStyleProperties(HMODULE panoramaDll) {
 		auto addr = getAddress(panoramaDll, "0f 10 45 f7 48 8d 0d ?? ?? ?? ?? 41 f7 c0 ff ff ff 7f");
 		if(0 == addr) {
 			if(!g_PanoramaStylePropertySymbols.resolve) {
-				ErrorBox(MkErrStr(__FILE__, __LINE__));
+				advancedfx::Warning("AFXWARNING: Panorama style-symbol lookup unavailable; style writes disabled.\n");
 				return false;
 			}
 			advancedfx::Warning("AFXWARNING: Panorama style-symbol map is unavailable; style lookup will use the resolver.\n");
@@ -268,12 +345,14 @@ bool MirvPanorama_InitStyleProperties(HMODULE panoramaDll) {
 	{
 		auto addr = getAddress(panoramaDll, "E8 ?? ?? ?? ?? 48 8D 05 ?? ?? ?? ?? 48 89 45 ?? EB");
 		if(!addr) {
-			ErrorBox(MkErrStr(__FILE__, __LINE__));
+			advancedfx::Warning("AFXWARNING: Panorama style setter unavailable; style writes disabled.\n");
 			return false;
 		}
 
 		g_CPanelStyleSetStyleProperty = (g_CPanelStyleSetStyleProperty_t)(addr + 5 + *(int32_t*)(addr + 1));
 	}
 
+	g_StylePropertiesReady = true;
+	advancedfx::Message("[mirv_panorama] style properties ready (on-demand initialization supported).\n");
 	return true;
 }

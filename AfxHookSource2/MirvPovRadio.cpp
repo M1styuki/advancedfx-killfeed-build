@@ -1,6 +1,7 @@
 #include "stdafx.h"
 
 #include "MirvPovRadio.h"
+#include "MirvPovAgentVoiceData.h"
 
 #include "ClientEntitySystem.h"
 #include "Globals.h"
@@ -165,24 +166,8 @@ constexpr int kRecentGrenadeThrowTickWindow = 64;
 constexpr ULONGLONG kSyntheticAudioWaitMs = 180;
 constexpr int kSyntheticAudioWaitTicks = 8;
 constexpr ULONGLONG kRecentNativeAudioWindowMs = 800;
-// Legacy RVA values from the client.dll analyzed by IDA Pro (image base
-// 0x180000000). The tables move between client builds, so initialization first
-// resolves each CGameMessageDelegateHook vtable from its MSVC RTTI and only
-// uses these addresses as compatibility fallbacks.
-// IDA Pro (client.dll 2026-08-11): CCSUsrMsg_RadioText is registered by
-// sub_1810D2FB0, whose CGameMessageDelegateHook object uses off_181B75608.
-// Its +0x28 slot is sub_1810D5040 (the generic Dispatch).  0x1BB7ED0 is a
-// different user-message table and never receives RadioText callbacks.
-constexpr uintptr_t kRadioTextVtableRva = 0x1B75608;
-// IDA Pro (client.dll 2026-08-11): the registered user-message tables are
-// adjacent to RadioText.  SendAudio is off_181B756E8 and RawAudio is
-// off_181B75640.  The previous source used 0x1AB9220/0x1B756E8, which swapped
-// the real message tables and made the native audio delegate hooks miss the
-// messages that carry the agent voice filename.
-constexpr uintptr_t kSendAudioVtableRva = 0x1B756E8;
-constexpr uintptr_t kSendAudioVtableLegacyRva = 0x1AB9220;
-constexpr uintptr_t kRawAudioVtableRva = 0x1B75640;
-constexpr uintptr_t kRawAudioVtableLegacyRva = 0x1BB7FB0;
+// Delegate identity comes from MSVC RTTI. An executable dispatch slot at an
+// old table RVA cannot establish that it still belongs to the same message.
 RadioTextHandler_t g_OrgRadioTextHandler = nullptr;
 RadioTextDispatch_t g_OrgRadioTextDispatch = nullptr;
 SendAudioDispatch_t g_OrgSendAudioDispatch = nullptr;
@@ -1325,11 +1310,12 @@ bool IsSuppressedRadioToken(const char * text)
         || ContainsNormalizedRadioToken(text, "loosebomb");
 }
 
-bool IsLikelyAgentDefIndex(int value)
+const char * AgentFamilyFromDefIndex(int defIndex)
 {
-    // Agent item definitions occupy the 5xxx range.  Reject zero/garbage from
-    // a not-yet-replicated controller instead of treating it as a real family.
-    return 5000 <= value && value < 7000;
+    for(const auto & agent : MirvPovAgentVoice::kAgents) {
+        if(agent.definition == defIndex) return agent.family;
+    }
+    return nullptr;
 }
 
 int ReadPawnCharacterDefIndex(CEntityInstance * controller)
@@ -1340,58 +1326,28 @@ int ReadPawnCharacterDefIndex(CEntityInstance * controller)
     __try {
         unsigned char * address = reinterpret_cast<unsigned char *>(controller)
             + g_clientDllOffsets.CCSPlayerController.m_nPawnCharacterDefIndex;
-        value = *reinterpret_cast<int *>(address);
-        if(!IsLikelyAgentDefIndex(value)) {
-            // item_definition_index_t is 16-bit in some schema generations.
-            // Read the narrow form only after rejecting the wide value so a
-            // neighbouring field cannot be mistaken for an agent id.
-            value = static_cast<int>(*reinterpret_cast<uint16_t *>(address));
-        }
+        // The replicated item definition is uint16; adjacent bytes are not
+        // part of its identity. Valid agents also occupy the 46xx/47xx ranges.
+        value = static_cast<int>(*reinterpret_cast<uint16_t *>(address));
     } __except(EXCEPTION_EXECUTE_HANDLER) {
         value = -1;
     }
-    // Some demo builds expose the field as a short item-definition value.  An
-    // invalid controller read is not useful, but a valid 5xxx value is safe to
-    // retain; this also prevents random entity bytes from selecting an agent.
-    return IsLikelyAgentDefIndex(value) ? value : -1;
-}
-
-const char * AgentFamilyFromDefIndex(int defIndex)
-{
-    if(!IsLikelyAgentDefIndex(defIndex)) return nullptr;
-
-    // Current items_game agent definitions.  Keep the ranges explicit because
-    // the compact ranges used by older builds mixed 5037 into Phoenix and
-    // mapped the CT families to the wrong voice directory.
-    if(5036 == defIndex
-        || (5038 <= defIndex && defIndex <= 5047)
-        || (5053 <= defIndex && defIndex <= 5057)
-        || (5200 <= defIndex && defIndex <= 5204)) return "phoenix";
-    if(5048 <= defIndex && defIndex <= 5052) return "professional";
-    if(5037 == defIndex
-        || (5079 <= defIndex && defIndex <= 5082)
-        || 5600 == defIndex) return "sas";
-    if(5058 <= defIndex && defIndex <= 5067) return "gsg9";
-    if(5068 <= defIndex && defIndex <= 5078)
-        return "swat";
-    if(5083 <= defIndex && defIndex <= 5087) return "swat";
-    if(5088 <= defIndex && defIndex <= 5096) return "balkan";
-    if(5097 == defIndex) return "fbihrt";
-    if(5100 <= defIndex && defIndex <= 5104) return "leet";
-    if(5300 <= defIndex && defIndex <= 5304) return "fbihrt";
-    return nullptr;
+    return AgentFamilyFromDefIndex(value) ? value : -1;
 }
 
 const char * FindVoiceFamilyInText(const char * text)
 {
     if(nullptr == text || '\0' == text[0]) return nullptr;
-    static const char * const families[] = {
-        "professional", "gsg9", "sas", "swat", "fbihrt",
-        "balkan", "phoenix", "leet", "separatist", "anarchist",
-        "pirate", "militia"
-    };
-    for(const char * family : families) {
-        if(ContainsInsensitive(text, family)) return family;
+    // Match a whole sound-event prefix or path component. A substring match
+    // collapses swat_fem/professional_epic into a different actor's voice.
+    for(const auto & voice : MirvPovAgentVoice::kThrows) {
+        const size_t length = strlen(voice.family);
+        for(const char * cursor = text; *cursor; ++cursor) {
+            if(cursor != text && cursor[-1] != '/' && cursor[-1] != '\\') continue;
+            if(0 != _strnicmp(cursor, voice.family, length)) continue;
+            const char end = cursor[length];
+            if(end == '.' || end == '/' || end == '\\' || end == '\0') return voice.family;
+        }
     }
     return nullptr;
 }
@@ -1895,15 +1851,19 @@ const char * PickVoiceVariant(const char * const * variants, size_t count, uint3
     return variants[seed % count];
 }
 
-bool UsesCtThrowVoiceNames(const char * prefix)
+const char * PickThrowVoiceStem(const char * family, int slot, uint32_t seed)
 {
-    // CS2 kept the legacy throw-callout families: SAS/SWAT/GSG9/FBIHRT use
-    // ct_* resources, while Professional and the T families use t_* resources.
-    return nullptr != prefix
-        && (0 == strcmp(prefix, "sas")
-            || 0 == strcmp(prefix, "swat")
-            || 0 == strcmp(prefix, "gsg9")
-            || 0 == strcmp(prefix, "fbihrt"));
+    const int column = slot == 101 ? 0 : slot == 102 ? 1 : slot == 103 ? 2
+        : (slot == 104 || slot == 105) ? 3 : slot == 106 ? 4 : -1;
+    if(nullptr == family || column < 0) return nullptr;
+    for(const auto & voice : MirvPovAgentVoice::kThrows) {
+        if(0 != strcmp(voice.family, family)) continue;
+        const auto & variants = voice.stems[column];
+        size_t count = 0;
+        while(count < sizeof(variants) / sizeof(variants[0]) && variants[count]) ++count;
+        return PickVoiceVariant(variants, count, seed);
+    }
+    return nullptr;
 }
 
 // Build the actual CS2 SoundEvent name used by the agent voice resources.
@@ -1936,37 +1896,12 @@ bool BuildSyntheticAudioCue(
 
     const bool isCt = 3 == ResolveControllerTeam(controller);
     const char * prefix = GetAgentVoicePrefix(controller);
-    if(nullptr == prefix) prefix = isCt ? "professional" : "balkan";
+    if(nullptr == prefix) prefix = isCt ? "sas" : "phoenix";
     const uint32_t seed = VoiceVariantSeed(controller, slot);
     const char * stem = nullptr;
 
-    static const char * const tSmoke[] = {"t_smoke01", "t_smoke02", "t_smoke03"};
-    static const char * const tFlash[] = {"t_flashbang01", "t_flashbang02", "t_flashbang03"};
-    static const char * const tHe[] = {"t_grenade01", "t_grenade02"};
-    static const char * const tMolotov[] = {"t_molotov01", "t_molotov02"};
-    static const char * const ctSmoke[] = {"ct_smoke01", "ct_smoke02"};
-    static const char * const ctFlash[] = {"ct_flashbang01", "ct_flashbang02"};
-    static const char * const ctHe[] = {"ct_grenade01"};
-    static const char * const ctMolotov[] = {"ct_molotov01", "ct_molotov02"};
-
-    if(101 == slot) {
-        stem = UsesCtThrowVoiceNames(prefix)
-            ? PickVoiceVariant(ctSmoke, sizeof(ctSmoke) / sizeof(ctSmoke[0]), seed)
-            : PickVoiceVariant(tSmoke, sizeof(tSmoke) / sizeof(tSmoke[0]), seed);
-    } else if(102 == slot) {
-        stem = UsesCtThrowVoiceNames(prefix)
-            ? PickVoiceVariant(ctFlash, sizeof(ctFlash) / sizeof(ctFlash[0]), seed)
-            : PickVoiceVariant(tFlash, sizeof(tFlash) / sizeof(tFlash[0]), seed);
-    } else if(103 == slot) {
-        stem = UsesCtThrowVoiceNames(prefix)
-            ? PickVoiceVariant(ctHe, sizeof(ctHe) / sizeof(ctHe[0]), seed)
-            : PickVoiceVariant(tHe, sizeof(tHe) / sizeof(tHe[0]), seed);
-    } else if(104 == slot || 105 == slot) {
-        stem = UsesCtThrowVoiceNames(prefix)
-            ? PickVoiceVariant(ctMolotov, sizeof(ctMolotov) / sizeof(ctMolotov[0]), seed)
-            : PickVoiceVariant(tMolotov, sizeof(tMolotov) / sizeof(tMolotov[0]), seed);
-    } else if(106 == slot) {
-        stem = "t_decoy01";
+    if(101 <= slot && slot <= 106) {
+        stem = PickThrowVoiceStem(prefix, slot, seed);
     } else if(isCt) {
         // Professional's resources use the radiobot* stem names.  The agent
         // family prefix still selects the actual operator voice; the filename
@@ -3287,7 +3222,6 @@ void MirvPovRadio_Initialize(HMODULE clientDll)
 {
     if(g_Hooked || nullptr == clientDll) return;
 
-    const uintptr_t clientBase = reinterpret_cast<uintptr_t>(clientDll);
     g_RadioTextVtable = nullptr;
     g_SendAudioVtable = nullptr;
     g_RawAudioVtable = nullptr;
@@ -3333,27 +3267,6 @@ void MirvPovRadio_Initialize(HMODULE clientDll)
             textRange,
             resolvedVtable)) {
         g_RawAudioVtable = resolvedVtable;
-    }
-
-    // RTTI is the authoritative mapping. Retain the previous build's table
-    // addresses only as guarded compatibility fallbacks; an RVA that now points
-    // at unrelated data must never become an expected delegate owner.
-    size_t legacyDispatchAddress = 0;
-    const void * legacyVtable = nullptr;
-    if(nullptr == g_RadioTextVtable) {
-        legacyVtable = reinterpret_cast<const void *>(clientBase + kRadioTextVtableRva);
-        if(ReadDelegateDispatch(legacyVtable, textRange, legacyDispatchAddress))
-            g_RadioTextVtable = legacyVtable;
-    }
-    if(nullptr == g_SendAudioVtable) {
-        legacyVtable = reinterpret_cast<const void *>(clientBase + kSendAudioVtableRva);
-        if(ReadDelegateDispatch(legacyVtable, textRange, legacyDispatchAddress))
-            g_SendAudioVtable = legacyVtable;
-    }
-    if(nullptr == g_RawAudioVtable) {
-        legacyVtable = reinterpret_cast<const void *>(clientBase + kRawAudioVtableRva);
-        if(ReadDelegateDispatch(legacyVtable, textRange, legacyDispatchAddress))
-            g_RawAudioVtable = legacyVtable;
     }
 
     // IDA Pro (client.dll 2026-08-10): this is the actual HudChat formatter
@@ -3423,36 +3336,10 @@ void MirvPovRadio_Initialize(HMODULE clientDll)
         MIRV_POV_DIAGNOSTIC_WARNING("[mirv_pov_radio] Demo controller getter was not resolved.\n");
     }
 
-    // IDA Pro (client.dll 2026-08-11): the SendAudio delegate's vtable is
-    // 0x181B756E8 and its Dispatch slot (+0x28) is sub_1810D5210.  The
-    // function is one of several cloned CGameMessageDelegateHook bodies, so
-    // match the unique SendAudio tail (the call to sub_180B12310) and step
-    // back 0x8d bytes to the function start.  This is the actual
-    // Dispatch(owner, message) path; the nearby CBufferString/protobuf
-    // formatter is not a user-message callback and must not be detoured.
-    const char * sendAudioTailPattern =
-        "48 89 BC 24 E0 00 00 00 E8 D6 D9 FD FF "
-        "48 8B 4B 38 48 8D 56 30 F2 0F 10 46 08 48 8B F8";
+    // The RTTI-resolved +0x28 slot is Dispatch(owner, wrapper), distinct
+    // from the typed protobuf parser hooked below.
     size_t sendAudioAddress = 0;
-    size_t sendAudioTailAddress = 0;
     bool sendAudioResolved = ReadDelegateDispatch(g_SendAudioVtable, textRange, sendAudioAddress);
-    if(!sendAudioResolved) {
-        // Keep compatibility with the previous client build whose SendAudio
-        // delegate used the neighboring RVA 0x1B05578.
-        const void * legacyVtable = reinterpret_cast<const void *>(clientBase + kSendAudioVtableLegacyRva);
-        size_t legacyAddress = 0;
-        if(ReadDelegateDispatch(legacyVtable, textRange, legacyAddress)) {
-            g_SendAudioVtable = legacyVtable;
-            sendAudioAddress = legacyAddress;
-            sendAudioResolved = true;
-        }
-    }
-    if(!sendAudioResolved
-        && FindUniquePattern(textRange, sendAudioTailPattern, sendAudioTailAddress)
-        && sendAudioTailAddress >= 0x8d) {
-        sendAudioAddress = sendAudioTailAddress - 0x8d;
-        sendAudioResolved = true;
-    }
     if(sendAudioResolved) {
         g_OrgSendAudioDispatch = reinterpret_cast<SendAudioDispatch_t>(sendAudioAddress);
         DetourTransactionBegin();
@@ -3478,10 +3365,27 @@ void MirvPovRadio_Initialize(HMODULE clientDll)
         "0F B6 41 ?? 88 44 24 ?? 8B 41 ?? 89 44 24 ?? 8B 41 ?? "
         "89 44 24 ?? 48 8B 41 ??";
     size_t sendAudioEmitterAddress = 0;
-    const bool sendAudioEmitterResolved = FindUniquePattern(
-        textRange,
-        sendAudioEmitterPattern,
-        sendAudioEmitterAddress);
+    // The prologue is shared by many message emitters. Identify the typed
+    // message vtable installed by the emitter, rather than accepting a clone.
+    const auto sendAudioMessageVtable = Afx::BinUtils::FindClassVtable(
+        clientDll, ".?AVCUserMessageSendAudio_t@@", 0, 0);
+    size_t emitterCount = 0;
+    auto emitterRemaining = textRange;
+    while(sendAudioMessageVtable && !emitterRemaining.IsEmpty()) {
+        auto candidate = Afx::BinUtils::FindPatternString(emitterRemaining, sendAudioEmitterPattern);
+        if(candidate.IsEmpty()) break;
+        if(candidate.Start + 0x6c <= textRange.End) {
+            const auto load = reinterpret_cast<const uint8_t *>(candidate.Start + 0x65);
+            const uint8_t expected[] = {0x48, 0x8d, 0x05};
+            if(0 == memcmp(load, expected, sizeof(expected))
+                && reinterpret_cast<size_t>(load + 7 + *reinterpret_cast<const int32_t *>(load + 3)) == sendAudioMessageVtable) {
+                sendAudioEmitterAddress = candidate.Start;
+                ++emitterCount;
+            }
+        }
+        emitterRemaining = Afx::BinUtils::MemRange(candidate.Start + 1, textRange.End);
+    }
+    const bool sendAudioEmitterResolved = emitterCount == 1;
     if(sendAudioEmitterResolved) {
         g_OrgSendAudioEmitter = reinterpret_cast<SendAudioEmitter_t>(sendAudioEmitterAddress);
         DetourTransactionBegin();
@@ -3530,20 +3434,9 @@ void MirvPovRadio_Initialize(HMODULE clientDll)
             "[mirv_pov_radio] No SendAudio delegate, emitter, or parser path was resolved.\n");
     }
 
-    // RawAudio has the same cloned delegate shape.  IDA identifies the
-    // RawAudio table at image+0x1B75640 and its +0x28 slot as
-    // sub_1810D55B0.  Fall back to the previous table only on older builds.
+    // RawAudio uses the same RTTI-resolved delegate slot.
     size_t rawAudioAddress = 0;
     bool rawAudioResolved = ReadDelegateDispatch(g_RawAudioVtable, textRange, rawAudioAddress);
-    if(!rawAudioResolved) {
-        const void * legacyVtable = reinterpret_cast<const void *>(clientBase + kRawAudioVtableLegacyRva);
-        size_t legacyAddress = 0;
-        if(ReadDelegateDispatch(legacyVtable, textRange, legacyAddress)) {
-            g_RawAudioVtable = legacyVtable;
-            rawAudioAddress = legacyAddress;
-            rawAudioResolved = true;
-        }
-    }
     if(rawAudioResolved) {
         g_OrgRawAudioHandler = reinterpret_cast<RawAudioHandler_t>(rawAudioAddress);
         DetourTransactionBegin();

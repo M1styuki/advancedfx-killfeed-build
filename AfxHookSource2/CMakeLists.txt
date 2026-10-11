@@ -17,6 +17,10 @@ set(AFXHOOKSOURCE2_SHADERS
     "${CMAKE_CURRENT_SOURCE_DIR}/../shaders/build/afx_depth_vs_5_0.h"
     "${CMAKE_CURRENT_SOURCE_DIR}/../shaders/build/afx_depth_ps_5_0.acs"
     "${CMAKE_CURRENT_SOURCE_DIR}/../shaders/build/afx_depth_ps_5_0.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../shaders/build/afx_scale_vs_5_0.acs"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../shaders/build/afx_scale_vs_5_0.h"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../shaders/build/afx_scale_ps_5_0.acs"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../shaders/build/afx_scale_ps_5_0.h"
 )
 
 set(AFXHOOKSOURCE2_SHADERS_SOURCES
@@ -26,6 +30,8 @@ set(AFXHOOKSOURCE2_SHADERS_SOURCES
 	"${CMAKE_CURRENT_SOURCE_DIR}/../shaders/afx_drawtexture_ps_5_0.fxc"
     "${CMAKE_CURRENT_SOURCE_DIR}/../shaders/afx_depth_vs_5_0.fxc"
     "${CMAKE_CURRENT_SOURCE_DIR}/../shaders/afx_depth_ps_5_0.fxc"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../shaders/afx_scale_vs_5_0.fxc"
+    "${CMAKE_CURRENT_SOURCE_DIR}/../shaders/afx_scale_ps_5_0.fxc"
 )
 
 add_custom_command(
@@ -38,6 +44,8 @@ add_custom_command(
 	COMMAND ShaderBuilder.exe --profile ps_5_0 --in "${CMAKE_CURRENT_SOURCE_DIR}/../shaders/afx_drawtexture_ps_5_0.fxc" --outPrefix "${CMAKE_CURRENT_SOURCE_DIR}/../shaders/build/afx_drawtexture_ps_5_0"
 	COMMAND ShaderBuilder.exe --profile vs_5_0 --in "${CMAKE_CURRENT_SOURCE_DIR}/../shaders/afx_depth_vs_5_0.fxc" --outPrefix "${CMAKE_CURRENT_SOURCE_DIR}/../shaders/build/afx_depth_vs_5_0"
 	COMMAND ShaderBuilder.exe --profile ps_5_0 --in "${CMAKE_CURRENT_SOURCE_DIR}/../shaders/afx_depth_ps_5_0.fxc" --outPrefix "${CMAKE_CURRENT_SOURCE_DIR}/../shaders/build/afx_depth_ps_5_0"
+	COMMAND ShaderBuilder.exe --profile vs_5_0 --in "${CMAKE_CURRENT_SOURCE_DIR}/../shaders/afx_scale_vs_5_0.fxc" --outPrefix "${CMAKE_CURRENT_SOURCE_DIR}/../shaders/build/afx_scale_vs_5_0"
+	COMMAND ShaderBuilder.exe --profile ps_5_0 --in "${CMAKE_CURRENT_SOURCE_DIR}/../shaders/afx_scale_ps_5_0.fxc" --outPrefix "${CMAKE_CURRENT_SOURCE_DIR}/../shaders/build/afx_scale_ps_5_0"
 )
 
 add_custom_target(AfxHookSource2Shaders
@@ -116,6 +124,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     ${AFX_OPENEXR_LINK_LIBRARIES}
     afx_hook_source2
 	dxguid.lib
+    d3dcompiler.lib
     bcrypt.lib # corrosion fails to detect this
     $<$<CONFIG:Debug>:msvcrtd.lib> # corrision messes this up in latest rust version
 )
@@ -240,8 +249,15 @@ target_sources(${PROJECT_NAME} PRIVATE
     ClientEntitySystem.cpp
     ClientEntitySystem.h
 
+    MirvWeather.cpp
+    MirvWeather.h
+    MirvWeatherStorm.cpp
+    MirvWeatherStorm.h
+    MirvWeatherRender.cpp
     MirvPovCore.cpp
     MirvPovCore.h
+    MirvPovMvpMusic.cpp
+    MirvPovMvpMusic.h
     MirvPovBuyMenu.cpp
     MirvPovBuyMenu.h
 

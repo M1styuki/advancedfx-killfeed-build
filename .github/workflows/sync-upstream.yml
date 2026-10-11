@@ -1,6 +1,9 @@
 name: Sync upstream
 
 on:
+  schedule:
+    # Run every six hours. Scheduled workflows use UTC.
+    - cron: "17 */6 * * *"
   workflow_dispatch:
 
 permissions:

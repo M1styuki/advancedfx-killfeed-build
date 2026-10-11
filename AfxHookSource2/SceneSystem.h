@@ -27,3 +27,7 @@ public:
 };
 
 extern CResourceSystem* g_pCResourceSystem;
+
+// Typed material-system lookup after the generic resource blocking load.
+CMaterial2 ** FindRenderMaterial(const char * name);
+bool MaterialRenderCallbacksReady(CMaterial2 * material);

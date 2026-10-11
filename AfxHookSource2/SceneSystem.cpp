@@ -5,6 +5,8 @@
 #include "SchemaSystem.h"
 #include "MirvColors.h"
 #include "StreamSettings.h"
+#include "MirvWeather.h"
+#include "MirvWeatherStorm.h"
 
 #include "../shared/StringTools.h"
 #include "../deps/release/Detours/src/detours.h"
@@ -31,6 +33,25 @@ MaterialUpdate_t org_MaterialUpdate = nullptr;
 
 CResourceSystem* g_pCResourceSystem = nullptr;
 
+CMaterial2 ** FindRenderMaterial(const char * name) {
+	CMaterial2 ** result = nullptr;
+	if(org_FindMaterial && name) org_FindMaterial(nullptr, &result, name);
+	return result;
+}
+
+bool MaterialRenderCallbacksReady(CMaterial2 * material) {
+	if(!material) return false;
+	void ** table = *reinterpret_cast<void ***>(material);
+	if(!table || !table[0] || !table[5]) return false;
+	for(void * callback : {table[0], table[5]}) {
+		MEMORY_BASIC_INFORMATION info {};
+		if(!VirtualQuery(callback, &info, sizeof(info)) || info.State != MEM_COMMIT
+			|| (info.Protect & (PAGE_GUARD | PAGE_NOACCESS))) return false;
+		if(!(info.Protect & (PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY))) return false;
+	}
+	return true;
+}
+
 struct CBufferStringWrapper {
 	SOURCESDK::CS2::CBufferString buf;
 	u_char pad[0xE0 - sizeof(SOURCESDK::CS2::CBufferString)];
@@ -49,66 +70,6 @@ struct CustomSkyState {
 	bool drawClouds = true;
 	float brightness = 1.0f;
 } g_CustomSky;
-
-std::map<void *, size_t> g_PickerEntities;
-
-bool g_PickerActive =  false;
-bool g_PickerCollecting = false;
-bool g_PickerPrint = false;
-
-void Picker_Pick(bool wasVisible)
-{
-	if (!g_PickerActive)
-	{
-		g_PickerActive = true;
-		g_PickerCollecting = true;
-		g_PickerPrint = true;
-	}
-	else
-	{
-		if (g_PickerCollecting)
-			g_PickerCollecting = false;
-
-		size_t index = 0;
-
-		for (auto it = g_PickerEntities.begin(); it != g_PickerEntities.end(); )
-		{
-			size_t oldIndex = it->second;
-
-			if ((1 == (oldIndex & 0x1)) == wasVisible)
-			{
-				it = g_PickerEntities.erase(it);
-			}
-			else
-			{
-				it->second = index;
-				++index;
-				++it;
-			}
-		}
-	}
-
-	g_PickerPrint = true;
-}
-
-void Picker_Stop(void)
-{
-	if(g_PickerActive)
-	{
-		g_PickerEntities.clear();
-		g_PickerActive = false;
-		advancedfx::Message("==== Picker stopped. ====\n");
-	}
-}
-
-void PickerPrintReset(){
-	if(g_PickerPrint) {
-		g_PickerPrint = false;
-
-		bool determinedEntities = g_PickerEntities.size() <= 1;
-		if (determinedEntities) Picker_Stop();
-	}
-}
 
 // 64-bit hash for 32-bit platforms
 // Credit
@@ -297,12 +258,14 @@ struct CBaseSceneData {
 	CMaterial2* material;
 	char _pad1[0x28];
 	uint32_t color;
-	char _pad2[0x14];
+	// The native scene array/capture copier advances by 0x70 bytes on CS2
+	// 1.41.8.9. Keep its tail as well: wet overrides submit a complete record.
+	char _pad2[0x1c];
 };
 
 size_t g_SceneObject_pSceneObjectDesc_Offset = -1;
 
-static_assert(sizeof(CBaseSceneData) == 0x68, "Unexpected CBaseSceneData size.");
+static_assert(sizeof(CBaseSceneData) == 0x70, "Unexpected native scene record size.");
 
 enum class SceneObjectDrawPolicy {
 	Draw,
@@ -342,6 +305,7 @@ SceneObjectDrawPolicy g_SceneSemanticPolicies[(int)SceneSemanticGroup::Count] = 
 };
 
 std::atomic_bool g_bSceneFilterSystemActive = false;
+std::shared_mutex g_bSceneSystemMutex;
 
 void UpdateSceneFilterSystemActive() {
 	bool bActive =
@@ -349,8 +313,7 @@ void UpdateSceneFilterSystemActive() {
 		|| g_BaseSceneObjectsPolicy != SceneObjectDrawPolicy::Draw
 		|| g_AnimatableSceneObjectsPolicy != SceneObjectDrawPolicy::Draw
 		|| g_AggregateSceneObjectsPolicy != SceneObjectDrawPolicy::Draw
-		|| g_OverlaysPolicy != SceneObjectDrawPolicy::Draw
-		|| g_PickerActive;
+		|| g_OverlaysPolicy != SceneObjectDrawPolicy::Draw;
 
 	for(int i = 0; !bActive && i < (int)SceneSemanticGroup::Count; i++) {
 		bActive = g_SceneSemanticPolicies[i] != SceneObjectDrawPolicy::Draw;
@@ -360,6 +323,8 @@ void UpdateSceneFilterSystemActive() {
 }
 
 void ClearSceneFliterSystemPolicies() {
+	std::unique_lock<std::shared_mutex> lock(g_bSceneSystemMutex);
+
 	g_BaseSceneObjectsPolicy = SceneObjectDrawPolicy::Draw;
 	g_AnimatableSceneObjectsPolicy = SceneObjectDrawPolicy::Draw;
 	g_AggregateSceneObjectsPolicy = SceneObjectDrawPolicy::Draw;
@@ -373,6 +338,8 @@ void ClearSceneFliterSystemPolicies() {
 }
 
 void SetupSceneFilterPolicies(const class CStreamSettings & settings) {
+	std::unique_lock<std::shared_mutex> lock(g_bSceneSystemMutex);
+
 	switch(settings.ViewModelAction) {
 	case CStreamSettings::Action::NoDraw:
 		g_SceneSemanticPolicies[(int)SceneSemanticGroup::ViewModel] = SceneObjectDrawPolicy::Hide;
@@ -832,46 +799,17 @@ static uint16_t GetSceneDataFlags(const CBaseSceneData& sceneData) {
 	return *(uint16_t*)((const unsigned char*)&sceneData + g_SceneData_Flags_Offset);
 }*/
 
-static bool DebugPrintSceneData(const char * pContextTitle, SceneObjectFilterClass filterClass, const SceneLayerContext & context, const CBaseSceneData* sceneData, int count) {
-	if (g_iSceneFilterDebug <= 0 && !g_PickerActive || count <= 0) return true;
+static void DebugPrintSceneData(const char * pContextTitle, SceneObjectFilterClass filterClass, const SceneLayerContext & context, const CBaseSceneData* sceneData, int count) {
+	if (g_iSceneFilterDebug <= 0 || count <= 0) return;
 
 	bool canReadSceneDataFields = sceneData && SceneObjectFilterClassHasKnownSceneDataLayout(filterClass);
-
-	bool hidden = false;
 
 	for (int i = 0; i < count; ++i) {
 		const char* materialName = canReadSceneDataFields ? (sceneData[i].material ? sceneData[i].material->GetName() : nullptr) : nullptr;
 		const char* descName = canReadSceneDataFields ? GetSceneObjectDescName(sceneData[i]) : nullptr;
 		void* sceneObject = canReadSceneDataFields ? sceneData[i].sceneObject : nullptr;
 
-		bool bInList = false;
-		bool bIHidden = false;
-
-		if(g_PickerActive && sceneObject) {
-			if (!g_PickerCollecting)
-			{
-				auto itEnt = g_PickerEntities.find(sceneObject);
-				bInList = g_PickerEntities.end() != itEnt;
-				if(bInList){
-					bIHidden = bInList && ((itEnt->second) & 0x1) == 1;
-				}
-			}
-			else
-			{
-				auto itEnt = g_PickerEntities.lower_bound(sceneObject);
-				if (itEnt == g_PickerEntities.end() || (sceneObject < itEnt->first))
-				{
-					itEnt = g_PickerEntities.emplace_hint(itEnt, std::piecewise_construct, std::forward_as_tuple(sceneObject), std::forward_as_tuple(g_PickerEntities.size()));
-				}
-
-				bInList = true;
-				bIHidden = ((itEnt->second) & 0x1) == 1;
-			}
-		}
-
-		hidden = hidden || bIHidden;
-
-		if((!bInList || bIHidden || !g_PickerPrint) && g_iSceneFilterDebug <= 0) continue;
+		if(g_iSceneFilterDebug <= 0) continue;
 
 		advancedfx::Message(
 			"AFXDEBUG: mirv_scene_filter [%s] %s[%i/%i] layer=%s:%s group=%s desc=%s material=%s sceneObject=0x%p, flags=0x%08x\n",
@@ -888,11 +826,11 @@ static bool DebugPrintSceneData(const char * pContextTitle, SceneObjectFilterCla
 			context.Flags
 		);
 	}
-
-	return !hidden;
 }
 
 static SceneObjectDrawPolicy GetSceneDataPolicy(SceneObjectFilterClass filterClass, const SceneLayerContext & context, const CBaseSceneData * pSceneData) {
+
+	std::unique_lock<std::shared_mutex> lock(g_bSceneSystemMutex);
 
 	if (SceneObjectFilterClassIsSkyBox(filterClass)) {
 		SceneObjectDrawPolicy policy = ApplyLayerAwarePolicy(filterClass, context, nullptr, g_SceneSemanticPolicies[(int)SceneSemanticGroup::Sky]);
@@ -922,6 +860,8 @@ static SceneObjectDrawPolicy GetSceneDataPolicy(SceneObjectFilterClass filterCla
 		return ApplyLayerAwarePolicy(filterClass, context, nullptr, GetSceneObjectClassPolicy(filterClass));
 	}
 
+	if(MirvWeatherStorm_HideSun(materialName)) return SceneObjectDrawPolicy::Hide;
+
 	// Custom Sky related:
 	//
 	// There is some z fight going on, when camera is pointed to sun
@@ -941,14 +881,15 @@ static SceneObjectDrawPolicy GetSceneDataPolicy(SceneObjectFilterClass filterCla
 
 std::shared_timed_mutex g_BlockedSoftwareCommandListsMutex;
 std::set<void *> g_BlockedSoftwareCommandLists;
+std::atomic<void *> g_pPostProcessingCommandList = nullptr;
 
 void ClearThreadSceneLayerContexts(){
 	if(g_bSceneFilterSystemActive) {
-		g_PickerPrint = false;
 		{
 			std::unique_lock<std::shared_timed_mutex> lock(g_BlockedSoftwareCommandListsMutex);
 			g_BlockedSoftwareCommandLists.clear();
 		}
+		g_pPostProcessingCommandList = nullptr;
 	}
 }
 
@@ -990,29 +931,37 @@ void BlockColorDepth(void * pThisSoftwareCommandList){
 	if(!blocked) BlockColorDepth(pThisSoftwareCommandList,true,true);
 }
 
+bool IsBlocked(void * pThisSoftwareCommandList) {
+	std::shared_lock<std::shared_timed_mutex> lock(g_BlockedSoftwareCommandListsMutex);
+	return g_BlockedSoftwareCommandLists.find(pThisSoftwareCommandList) != g_BlockedSoftwareCommandLists.end();
+}
+
 void CheckAndDo_Untoggle_BlockColorDepth(void * pThisSoftwareCommandList) {
 	if(g_bSceneFilterSystemActive) {
-		bool blocked;
-		{
-			std::shared_lock<std::shared_timed_mutex> lock(g_BlockedSoftwareCommandListsMutex);
-			blocked = g_BlockedSoftwareCommandLists.find(pThisSoftwareCommandList) != g_BlockedSoftwareCommandLists.end();
-		}
-		if(blocked) {
-			std::unique_lock<std::shared_timed_mutex> lock(g_BlockedSoftwareCommandListsMutex);
-			auto it = g_BlockedSoftwareCommandLists.find(pThisSoftwareCommandList);
-			blocked = it != g_BlockedSoftwareCommandLists.end();
-			if(blocked) g_BlockedSoftwareCommandLists.erase(it);
-		}
-		if(blocked) {
+		if(IsBlocked(pThisSoftwareCommandList)) {
+			bool blocked;
+			{
+				std::unique_lock<std::shared_timed_mutex> lock(g_BlockedSoftwareCommandListsMutex);
+				auto it = g_BlockedSoftwareCommandLists.find(pThisSoftwareCommandList);
+				blocked = it != g_BlockedSoftwareCommandLists.end();
+				if(blocked) g_BlockedSoftwareCommandLists.erase(it);
+			}
 			BlockColorDepth(pThisSoftwareCommandList,false,false);
 		}
 	}
 }
 
+void QueueCallbackBeforePostProcessing(void* pCRenderContextDx11_SoftwareCommandList);
+void QueueCallbackAfterPostProcessing(void* pCRenderContextDx11_SoftwareCommandList);
+
 typedef void * (__fastcall * SoftwareCommandList_Commit_t)(void * pThisSoftwareCommandList);
 SoftwareCommandList_Commit_t org_SoftwareCommandList_Commit = nullptr;
 void * __fastcall new_SoftwareCommandList_Commit(void * pThisSoftwareCommandList) {
 	CheckAndDo_Untoggle_BlockColorDepth(pThisSoftwareCommandList);
+	if(g_pPostProcessingCommandList == pThisSoftwareCommandList) {
+		g_pPostProcessingCommandList = nullptr;
+		QueueCallbackAfterPostProcessing(pThisSoftwareCommandList);
+	}
 	return org_SoftwareCommandList_Commit(pThisSoftwareCommandList);
 }
 
@@ -1028,6 +977,9 @@ void SetContextFromDrawingData(SceneLayerContext & context, void * pDrawingData)
 	context.Flags = *(uint32_t*)((unsigned char*)pSceneLayer + g_SceneLayer_Flags_Offset);	
 }
 
+typedef void (__fastcall * DrawCurrentPrimitives_t)(void * pDrawingData);
+DrawCurrentPrimitives_t org_DrawCurrentPrimitives = nullptr;
+
 // Since the 2026-09-23 build there is a 5th (stack) argument: optional name suffix, formatted as "/%s" when not null.
 // It must be forwarded, otherwise the original formats garbage from our stack frame and crashes in tier0.
 typedef void (__fastcall * InitDrawingData_t)(unsigned char * pDrawingData,void *pSceneView,void *pSceneLayer,uint32_t unkFlags4,const char *pszNameSuffix);
@@ -1035,24 +987,32 @@ InitDrawingData_t org_InitDrawingData = nullptr;
 void __fastcall new_InitDrawingData(unsigned char * pDrawingData,void *pSceneView,void *pSceneLayer,uint32_t unkFlags4,const char *pszNameSuffix) {
 	org_InitDrawingData(pDrawingData,pSceneView,pSceneLayer,unkFlags4,pszNameSuffix);
 
-	if(g_bSceneFilterSystemActive && pDrawingData) {
-		void * pCRenderContextDx11_SoftwareCommandList = ((void **)pDrawingData)[4];
-		CheckAndDo_Untoggle_BlockColorDepth(pCRenderContextDx11_SoftwareCommandList);
-		if(org_SoftwareCommandList_Commit == nullptr) {
-			void** vtable = *(void***)pCRenderContextDx11_SoftwareCommandList;
-			org_SoftwareCommandList_Commit = (SoftwareCommandList_Commit_t)vtable[11];
+	SceneLayerContext context;
+	SetContextFromDrawingData(context, pDrawingData);
 
-			DetourTransactionBegin();
-			DetourUpdateThread(GetCurrentThread());
+	void * pCRenderContextDx11_SoftwareCommandList = ((void **)pDrawingData)[4];
 
-			DetourAttach(&(PVOID&)org_SoftwareCommandList_Commit, new_SoftwareCommandList_Commit);
+	if(org_SoftwareCommandList_Commit == nullptr) {
+		void** vtable = *(void***)pCRenderContextDx11_SoftwareCommandList;
+		org_SoftwareCommandList_Commit = (SoftwareCommandList_Commit_t)vtable[11];
 
-			if(NO_ERROR != DetourTransactionCommit()) {
-				ErrorBox("Failed to detour SoftwareCommandList::Commit.");
-				return;
-			}				
+		DetourTransactionBegin();
+		DetourUpdateThread(GetCurrentThread());
+
+		DetourAttach(&(PVOID&)org_SoftwareCommandList_Commit, new_SoftwareCommandList_Commit);
+
+		if(NO_ERROR != DetourTransactionCommit()) {
+			ErrorBox("Failed to detour SoftwareCommandList::Commit.");
+			return;
 		}
+	}
 
+	if(0 == strcmp(context.ViewPass,"PostProcessing")) {
+		QueueCallbackBeforePostProcessing(pCRenderContextDx11_SoftwareCommandList);
+		g_pPostProcessingCommandList = pCRenderContextDx11_SoftwareCommandList;
+	}
+
+	if(g_bSceneFilterSystemActive && pDrawingData) {
 		/*void** pSceneViewVtable = *(void***)pSceneView;
 		SceneLayerContext context;
 		context.ViewName = ((const char* (__fastcall*)(void*))pSceneViewVtable[0])(pSceneView); // see DebugSceneData function for how to know it's fist function in vtable.
@@ -1064,8 +1024,7 @@ void __fastcall new_InitDrawingData(unsigned char * pDrawingData,void *pSceneVie
 			if(!result.second) result.first->second = context;
 		}*/
 
-		SceneLayerContext context;
-		SetContextFromDrawingData(context, pDrawingData);
+		std::unique_lock<std::shared_mutex> lock(g_bSceneSystemMutex);
 
 		if(0 < g_iSceneFilterDebug) {
 			advancedfx::Message("AFXDEBUG: InitDrawingData layer=%s:%s flags=0x%08x unkFlags4=0x%08x\n",
@@ -1090,12 +1049,47 @@ void __fastcall new_InitDrawingData(unsigned char * pDrawingData,void *pSceneVie
 typedef void (__fastcall * DrawSceneData_t)(void * pDrawingData, CBaseSceneData * pSceneData);
 DrawSceneData_t org_DrawSceneData = nullptr;
 
-typedef void (__fastcall * DrawCurrentPrimitives_t)(void * pDrawingData);
-DrawCurrentPrimitives_t org_DrawCurrentPrimitives = nullptr;
+void DrawWeatherSceneData(void * drawingData, CBaseSceneData * sceneData) {
+    if(!MirvWeather_HasGroundOverride() && !MirvWeatherStorm_SunActive()) { org_DrawSceneData(drawingData, sceneData); return; }
+	bool worldLayout = false;
+	if(sceneData && sceneData->sceneObject && g_SceneObject_pSceneObjectDesc_Offset != size_t(-1)) {
+		if(void * desc = *(void **)((unsigned char *)sceneData->sceneObject + g_SceneObject_pSceneObjectDesc_Offset)) {
+			auto it = g_VtableToSceneObjectFilterClass.find(*(void ***)desc);
+			worldLayout = it != g_VtableToSceneObjectFilterClass.end()
+				&& (it->second == SceneObjectFilterClass::Base || it->second == SceneObjectFilterClass::Aggregate);
+		}
+	}
+	if(worldLayout && sceneData->material && drawingData && org_DrawCurrentPrimitives
+		&& MirvWeatherStorm_HideSun(sceneData->material->GetName())) {
+		// Flush before skipping a record so native contiguous batches cannot
+		// accidentally include the hidden sun card in a later merged draw.
+		org_DrawCurrentPrimitives(drawingData);
+		return;
+	}
+	CMaterial2 * wet = worldLayout ? MirvWeather_Material(sceneData->material) : nullptr;
+	if(sceneData && wet && wet != sceneData->material && drawingData && org_DrawCurrentPrimitives) {
+		// Submit the engine-owned record so native side paths retain their own
+		// stable storage. The material change is scoped to this isolated draw.
+		org_DrawCurrentPrimitives(drawingData);
+		CMaterial2 * original = sceneData->material;
+		sceneData->material = wet;
+		org_DrawSceneData(drawingData, sceneData);
+		org_DrawCurrentPrimitives(drawingData);
+		sceneData->material = original;
+	} else org_DrawSceneData(drawingData, sceneData);
+}
 
 void __fastcall new_DrawSceneData(void * pDrawingData, CBaseSceneData* pSceneData) {
 
 	if(g_bSceneFilterSystemActive && nullptr != pDrawingData) {
+
+		void * pCRenderContextDx11_SoftwareCommandList = ((void **)pDrawingData)[4];
+
+		if(IsBlocked(pCRenderContextDx11_SoftwareCommandList)) {
+			org_DrawSceneData(pDrawingData, pSceneData);
+			return;
+		}
+
 		SceneLayerContext context;
 		SetContextFromDrawingData(context, pDrawingData);
 
@@ -1109,14 +1103,10 @@ void __fastcall new_DrawSceneData(void * pDrawingData, CBaseSceneData* pSceneDat
 			}
 		}
 		
-		SceneObjectDrawPolicy policy;
-		if(DebugPrintSceneData("DrawSceneData", filterClass, context, pSceneData, 1)) {
-			policy = GetSceneDataPolicy(filterClass, context, pSceneData);
-		} else {
-			policy = SceneObjectDrawPolicy::Hide;
-		}
 
-		void * pCRenderContextDx11_SoftwareCommandList = ((void **)pDrawingData)[4];
+		DebugPrintSceneData("DrawSceneData", filterClass, context, pSceneData, 1);
+		SceneObjectDrawPolicy policy = GetSceneDataPolicy(filterClass, context, pSceneData);
+
 		switch (policy) {
 		default:
 		case SceneObjectDrawPolicy::Draw:
@@ -1128,7 +1118,7 @@ void __fastcall new_DrawSceneData(void * pDrawingData, CBaseSceneData* pSceneDat
 			BlockColorDepth(pCRenderContextDx11_SoftwareCommandList, true, true);
 			break;
 		}
-		org_DrawSceneData(pDrawingData, pSceneData);
+		DrawWeatherSceneData(pDrawingData, pSceneData);
 		org_DrawCurrentPrimitives(pDrawingData); // Force draw to prevent merging and get correct state.
 		switch (policy) {
 		default:
@@ -1142,7 +1132,7 @@ void __fastcall new_DrawSceneData(void * pDrawingData, CBaseSceneData* pSceneDat
 		return;
 	}
 
-	org_DrawSceneData(pDrawingData, pSceneData);
+	DrawWeatherSceneData(pDrawingData, pSceneData);
 }
 
 /*
@@ -1388,6 +1378,7 @@ CON_COMMAND(__mirv_scene_filter, "")
 		{
 			if (TryParseSceneObjectDrawPolicy(arg2, policy))
 			{
+				std::unique_lock<std::shared_mutex> lock(g_bSceneSystemMutex);
 				g_BaseSceneObjectsPolicy = policy;
 				UpdateSceneFilterSystemActive();
 				return;
@@ -1398,6 +1389,7 @@ CON_COMMAND(__mirv_scene_filter, "")
 		{
 			if (TryParseSceneObjectDrawPolicy(arg2, policy))
 			{
+				std::unique_lock<std::shared_mutex> lock(g_bSceneSystemMutex);
 				g_AnimatableSceneObjectsPolicy = policy;
 				UpdateSceneFilterSystemActive();
 				return;
@@ -1408,6 +1400,7 @@ CON_COMMAND(__mirv_scene_filter, "")
 		{
 			if (TryParseSceneObjectDrawPolicy(arg2, policy))
 			{
+				std::unique_lock<std::shared_mutex> lock(g_bSceneSystemMutex);
 				g_AggregateSceneObjectsPolicy = policy;
 				UpdateSceneFilterSystemActive();
 				return;
@@ -1418,6 +1411,7 @@ CON_COMMAND(__mirv_scene_filter, "")
 		{
 			if (TryParseSceneObjectDrawPolicy(arg2, policy))
 			{
+				std::unique_lock<std::shared_mutex> lock(g_bSceneSystemMutex);
 				g_OverlaysPolicy = policy == SceneObjectDrawPolicy::Hide
 					? SceneObjectDrawPolicy::Hide
 					: SceneObjectDrawPolicy::Draw;
@@ -1430,6 +1424,7 @@ CON_COMMAND(__mirv_scene_filter, "")
 		{
 			if (TryParseSceneObjectDrawPolicy(arg2, policy))
 			{
+				std::unique_lock<std::shared_mutex> lock(g_bSceneSystemMutex);
 				g_SceneSemanticPolicies[(int)semanticGroup] = policy;
 				UpdateSceneFilterSystemActive();
 				return;
@@ -1438,33 +1433,15 @@ CON_COMMAND(__mirv_scene_filter, "")
 
 		if (!_stricmp(arg1, "debug"))
 		{
+			std::unique_lock<std::shared_mutex> lock(g_bSceneSystemMutex);
 			g_iSceneFilterDebug = atoi(arg2);
 			if (g_iSceneFilterDebug < 0) g_iSceneFilterDebug = 0;
 			UpdateSceneFilterSystemActive();
 			return;
 		}
-
-		if (!_stricmp(arg1, "picker"))
-		{
-			if (!_stricmp(arg2, "ent") && 4 <= argc)
-			{
-				//curBaseFx->Console_DisableFastPathRequired();
-
-				bool value = 0 != atoi(args->ArgV(3));
-				Picker_Pick(value);
-				UpdateSceneFilterSystemActive();
-				return;
-			}
-			else
-			if (!_stricmp(arg2, "stop"))
-			{
-				Picker_Stop();
-				UpdateSceneFilterSystemActive();
-				return;
-			}
-		}		
 	}
 
+	std::shared_lock<std::shared_mutex> lock(g_bSceneSystemMutex);
 	advancedfx::Message(
 		"Usage:\n"
 		"%s base draw|hide|zonly|0|1 - Controls CBaseSceneObjectDesc entries in the hooked scene draw path.\n"
@@ -1480,11 +1457,7 @@ CON_COMMAND(__mirv_scene_filter, "")
 		"%s world draw|hide|zonly - Controls layers not matched by another semantic group.\n"
 		"%s sky draw|hide|zonly - Controls 3D skybox layers matched in the scene draw path.\n"
 		"%s debug <iCount> - Print up to iCount entries for each hooked scene draw call. Use 0 to disable.\n"
-		"%s picker ent 0|1 - Tell picker if entity is visible (1) or not (0). (Or start picking with 1.)\n"
-		"%s picker stop - Stop picking.\n"
 		"Current values: base=%s animatable=%s aggregate=%s smoke=%s overlays=%s viewModel=%s particles=%s firstPersonLegs=%s players=%s world=%s sky=%s debug=%i\n"
-		, arg0
-		, arg0
 		, arg0
 		, arg0
 		, arg0

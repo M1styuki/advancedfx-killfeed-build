@@ -1,4 +1,5 @@
 #include "SchemaSystem.h"
+#include "MirvWeather.h"
 #include "Globals.h"
 #include "../shared/AfxConsole.h"
 #include <winsock.h>
@@ -219,6 +220,8 @@ void HookSchemaSystem(HMODULE schemaSystemDll)
 	getOffsetsFromSchemaSystem(schemaSystem);
 
 	initSchemaSystemOffsets();
+
+	MirvWeather_ResolveSchemaOffsets();
 
 	g_SchemaSystemOffsets.clear();
 }

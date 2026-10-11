@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Net;
@@ -51,11 +51,11 @@ namespace AfxGui
 
             m_Guids = new Guid[]{
                 // current GUID:
-                new Guid("42062e08-7c9b-49b8-a7f7-d90affd21361"),
+                new Guid("0e4c2bbd-9d50-4502-9851-15055b5abfac"),
                 // current roll-back GUID:
-                new Guid("c0abf49c-110e-45ef-8a14-805d0baadc9f"),
+                new Guid("4cd4be2c-dbd9-481a-b7b8-a6806c41e6fe"),
                 // old GUID(s) to accept:
-                new Guid("641adba0-c220-4d8c-a78a-74677665e4bc")
+                new Guid("c433e1ae-f56e-4a36-9e0c-22711ec3211f")
             };
 
 	        m_Targets = new LinkedList<UpdateCheckNotificationTarget>();
