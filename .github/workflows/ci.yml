@@ -261,7 +261,7 @@ jobs:
             "DLL/source build commit: $env:GITHUB_SHA"
             "Build run: https://github.com/$env:GITHUB_REPOSITORY/actions/runs/$env:GITHUB_RUN_ID"
             'Build: Windows Release x64 success'
-            'CS2: 1.41.8.9 / source revision 11087167'
+            'Official upstream: ebbcd883d7b5e3d13ea2ce5cc4abdc89717f9861 (HLAE 2.192.7 plus end-of-match fix)'
             'Seven-map visual and repeated-seek acceptance: pending'
             ('DLL SHA256: ' + (Get-FileHash -LiteralPath stage/x64/AfxHookSource2.dll -Algorithm SHA256).Hash)
           ) | Set-Content -LiteralPath stage/BUILD-INFO.txt -Encoding utf8
@@ -277,7 +277,7 @@ jobs:
           @(
             'Extend seven-map weather with guarded native sun/exposure, before-UI grading and owned rain/thunder audio. Thunder is scheduled from demo time and from the final kept killfeed result; the cancelled lightning visuals are not generated. Preserve the user-selected night-rain sky and original seven-map resource profiles. Additional static puddle meshes and baked-lighting rebuilds remain outside this controller.'
             ''
-            'Use a complete official HLAE 2.192.6 installation. Download the Seven-map-storm test ZIP for the replacement DLL, separate weather data and Chinese instructions. It does not replace game maps or require a separate launcher.'
+            'Use a complete official HLAE 2.192.7 installation. Download the Seven-map-storm test ZIP for the replacement DLL, separate weather data and Chinese instructions. It does not replace game maps or require a separate launcher.'
             ''
             "DLL and complete corresponding source commit: $env:GITHUB_SHA. Windows Release x64 build passed; in-game seven-map indoor/outdoor, native ground, restore/seek, performance and recording acceptance is pending."
             ''
